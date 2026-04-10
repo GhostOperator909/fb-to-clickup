@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover — Python 3.9+ has zoneinfo
 # not secrets, so embedding in the app is the correct pattern.
 # --------------------------------------------------------------------------- #
 
-GITHUB_CLIENT_ID = "REPLACE_WITH_REAL_CLIENT_ID"
+GITHUB_CLIENT_ID = "Ov23litFOkzj5FblfN6H"
 
 API_ROOT       = "https://api.github.com"
 DEVICE_CODE_URL = "https://github.com/login/device/code"
