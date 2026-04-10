@@ -700,15 +700,16 @@ def run_sync(title_match_fallback=False):
 
         # ── Active/inactive sync ─────────────────────────────────────────────
         #   Meta ACTIVE   → Ad delivery = active
+        #     · launch-ready → running  (ad just started)
+        #     · closed       → running  (ad was reactivated in Meta)
+        #     · running      → unchanged
         #   Meta INACTIVE → Ad delivery = inactive
-        # Status transitions only happen for non-closed tasks:
-        #   launch-ready → running  when Meta goes ACTIVE
-        #   running      → closed   when Meta goes INACTIVE
-        # Closed tasks keep their delivery field updated but are never moved
-        # back to running, even if their Meta ad becomes active again.
+        #     · running → closed (ad was paused in Meta)
+        #     · closed  → unchanged
+        #     · launch-ready → unchanged (still waiting to launch)
         if meta_is_active:
             update_clickup_ad_delivery(task_id, "active", task_name)
-            if task_status == CU_STATUS_LAUNCH:
+            if task_status in (CU_STATUS_LAUNCH, CU_STATUS_CLOSED):
                 ok = update_clickup_status(task_id, CU_STATUS_RUNNING, task_name)
                 if ok:
                     stats["status_changed"].append({
