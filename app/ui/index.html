@@ -393,12 +393,20 @@
           <input id="conn-meta-token" type="password" placeholder="EAA..." autocomplete="off">
           <div class="hint">System user token with the <code>ads_read</code> scope. Leave blank when editing to keep the existing one.</div>
         </div>
+
+        <div class="field" id="conn-meta-account-picker-wrap" style="display:none">
+          <label>Choose ad account</label>
+          <select id="conn-meta-account-picker"></select>
+          <div class="hint">Pick the ad account this connection should sync. The numeric ID below is filled in automatically.</div>
+        </div>
+
         <div class="field">
           <label>Meta ad account ID</label>
           <input id="conn-meta-account" type="text" placeholder="1174046364280347">
-          <div class="hint">Numbers only — no <code>act_</code> prefix.</div>
+          <div class="hint">Numbers only — no <code>act_</code> prefix. Auto-filled when you pick from the dropdown above.</div>
         </div>
         <div class="btn-row">
+          <button class="btn ghost" id="conn-load-meta-accounts-btn">Load accounts</button>
           <button class="btn ghost" id="conn-test-meta-btn">Test connection</button>
           <span id="conn-test-meta-result" class="pill dim hidden"></span>
         </div>
@@ -408,10 +416,21 @@
           <label>ClickUp API key</label>
           <input id="conn-clickup-key" type="password" placeholder="Inherits from Defaults" autocomplete="off">
         </div>
+
+        <div class="field" id="conn-clickup-list-picker-wrap" style="display:none">
+          <label>Choose list</label>
+          <select id="conn-clickup-list-picker"></select>
+          <div class="hint">Pick the ClickUp list this connection should sync into. The URL below is filled in automatically.</div>
+        </div>
+
         <div class="field">
           <label>ClickUp list URL</label>
           <input id="conn-clickup-list" type="text" placeholder="Inherits from Defaults">
-          <div class="hint">Override only if this account syncs into a different ClickUp list than your default.</div>
+          <div class="hint">Override only if this account syncs into a different ClickUp list than your default. Auto-filled when you pick from the dropdown above.</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn ghost" id="conn-load-clickup-lists-btn">Load lists</button>
+          <span id="conn-load-clickup-result" class="pill dim hidden"></span>
         </div>
 
         <h2 style="margin:18px 0 10px">Sync overrides (optional)</h2>
@@ -1325,6 +1344,12 @@ async function openConnectionModal(id) {
   document.getElementById('conn-id').value = id;
   document.getElementById('conn-modal-msg').classList.add('hidden');
   document.getElementById('conn-test-meta-result').classList.add('hidden');
+  // Reset dropdowns from any prior open
+  document.getElementById('conn-meta-account-picker-wrap').style.display = 'none';
+  document.getElementById('conn-meta-account-picker').innerHTML = '';
+  document.getElementById('conn-clickup-list-picker-wrap').style.display = 'none';
+  document.getElementById('conn-clickup-list-picker').innerHTML = '';
+  document.getElementById('conn-load-clickup-result').classList.add('hidden');
 
   if (id) {
     const c = await window.pywebview.api.get_connection(id);
@@ -1403,6 +1428,90 @@ document.getElementById('conn-delete-btn').addEventListener('click', async () =>
   await window.pywebview.api.delete_connection(id);
   document.getElementById('connection-modal').style.display = 'none';
   loadConnections();
+});
+
+// Load Meta ad accounts the saved/typed token can see, render as a dropdown
+document.getElementById('conn-load-meta-accounts-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('conn-load-meta-accounts-btn');
+  const wrap = document.getElementById('conn-meta-account-picker-wrap');
+  const sel = document.getElementById('conn-meta-account-picker');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Loading…';
+  try {
+    const token = document.getElementById('conn-meta-token').value.trim();
+    const id = document.getElementById('conn-id').value;
+    const r = await window.pywebview.api.list_meta_ad_accounts(token, id);
+    if (!r.ok) {
+      alert('Could not load Meta accounts: ' + (r.error || 'unknown'));
+      return;
+    }
+    const accts = r.accounts || [];
+    if (accts.length === 0) {
+      alert('No Meta ad accounts visible to this token.');
+      return;
+    }
+    sel.innerHTML = '<option value="">— pick an account —</option>' +
+      accts.map(a => {
+        const statusLabel = a.status === 1 ? '' : ' [inactive]';
+        return `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} (${escapeHtml(a.currency)})${statusLabel} — act_${escapeHtml(a.id)}</option>`;
+      }).join('');
+    wrap.style.display = '';
+    // If the input already has an account ID, preselect it
+    const cur = document.getElementById('conn-meta-account').value.trim();
+    if (cur && accts.some(a => a.id === cur)) sel.value = cur;
+  } catch (e) {
+    alert('Error: ' + e);
+  }
+  btn.disabled = false; btn.textContent = orig;
+});
+
+document.getElementById('conn-meta-account-picker').addEventListener('change', (e) => {
+  const v = e.target.value;
+  if (v) document.getElementById('conn-meta-account').value = v;
+});
+
+// Load ClickUp lists, render as a dropdown of "Workspace > Space > Folder > List"
+document.getElementById('conn-load-clickup-lists-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('conn-load-clickup-lists-btn');
+  const wrap = document.getElementById('conn-clickup-list-picker-wrap');
+  const sel = document.getElementById('conn-clickup-list-picker');
+  const pill = document.getElementById('conn-load-clickup-result');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Loading…';
+  pill.classList.add('hidden');
+  try {
+    const key = document.getElementById('conn-clickup-key').value.trim();
+    const id = document.getElementById('conn-id').value;
+    const r = await window.pywebview.api.list_clickup_lists(key, id);
+    if (!r.ok) {
+      pill.classList.remove('hidden', 'good', 'dim'); pill.classList.add('bad');
+      pill.textContent = '✗ ' + (r.error || 'unknown error').slice(0, 80);
+      return;
+    }
+    const lists = r.lists || [];
+    if (lists.length === 0) {
+      pill.classList.remove('hidden'); pill.classList.add('bad');
+      pill.textContent = '✗ No lists found';
+      return;
+    }
+    sel.innerHTML = '<option value="">— pick a list —</option>' +
+      lists.map(l => `<option value="${escapeHtml(l.url)}">${escapeHtml(l.path)}</option>`).join('');
+    wrap.style.display = '';
+    pill.classList.remove('hidden', 'bad', 'dim'); pill.classList.add('good');
+    pill.textContent = `✓ ${lists.length} lists`;
+    // Preselect if the URL already matches one
+    const cur = document.getElementById('conn-clickup-list').value.trim();
+    if (cur && lists.some(l => l.url === cur)) sel.value = cur;
+  } catch (e) {
+    pill.classList.remove('hidden'); pill.classList.add('bad');
+    pill.textContent = '✗ ' + String(e).slice(0, 80);
+  }
+  btn.disabled = false; btn.textContent = orig;
+});
+
+document.getElementById('conn-clickup-list-picker').addEventListener('change', (e) => {
+  const v = e.target.value;
+  if (v) document.getElementById('conn-clickup-list').value = v;
 });
 
 document.getElementById('conn-test-meta-btn').addEventListener('click', async () => {

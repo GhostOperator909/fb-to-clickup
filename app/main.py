@@ -822,6 +822,109 @@ def verify_setup(cfg: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def list_meta_ad_accounts(token: str) -> dict[str, Any]:
+    """
+    Return every ad account the given Meta access token can see.
+    Uses /me/adaccounts which works for both user tokens and system user tokens.
+    """
+    import urllib.request, urllib.error
+    if not token:
+        return {"ok": False, "error": "Missing Meta access token"}
+    accounts = []
+    url = (
+        "https://graph.facebook.com/v21.0/me/adaccounts"
+        f"?fields=account_id,name,currency,account_status&limit=200&access_token={token}"
+    )
+    try:
+        while url:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                data = json.loads(r.read())
+            for a in data.get("data", []):
+                accounts.append({
+                    "id":       a.get("account_id", ""),
+                    "name":     a.get("name", ""),
+                    "currency": a.get("currency", ""),
+                    "status":   a.get("account_status", 0),
+                })
+            url = data.get("paging", {}).get("next")
+        # Sort by name for nicer display
+        accounts.sort(key=lambda x: (x.get("name") or "").lower())
+        return {"ok": True, "accounts": accounts}
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode())
+            msg = body.get("error", {}).get("message", str(e))
+        except Exception:
+            msg = str(e)
+        return {"ok": False, "error": msg}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def list_clickup_lists(api_key: str) -> dict[str, Any]:
+    """
+    Walk every workspace → space → folder → list the given ClickUp API key
+    can see, plus folderless lists. Returns a flat array sorted by full path
+    so the UI can render a single dropdown like
+    'Brello — E-commerce > Creative Process > Creative Process List'.
+    """
+    import urllib.request, urllib.error
+    if not api_key:
+        return {"ok": False, "error": "Missing ClickUp API key"}
+
+    headers = {"Authorization": api_key}
+
+    def _get(url: str) -> dict:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+
+    out = []
+    try:
+        teams = _get("https://api.clickup.com/api/v2/team").get("teams", [])
+        for team in teams:
+            team_name = team.get("name") or team.get("id")
+            spaces = _get(
+                f"https://api.clickup.com/api/v2/team/{team['id']}/space?archived=false"
+            ).get("spaces", [])
+            for sp in spaces:
+                sp_name = sp.get("name", "")
+                # Folders + their lists
+                folders = _get(
+                    f"https://api.clickup.com/api/v2/space/{sp['id']}/folder?archived=false"
+                ).get("folders", [])
+                for f in folders:
+                    f_name = f.get("name", "")
+                    for li in f.get("lists", []) or []:
+                        out.append({
+                            "id":   li["id"],
+                            "name": li.get("name", ""),
+                            "path": f"{team_name} > {sp_name} > {f_name} > {li.get('name','')}",
+                            "url":  f"https://app.clickup.com/{team['id']}/v/li/{li['id']}",
+                        })
+                # Folderless lists in the space
+                folderless = _get(
+                    f"https://api.clickup.com/api/v2/space/{sp['id']}/list?archived=false"
+                ).get("lists", [])
+                for li in folderless:
+                    out.append({
+                        "id":   li["id"],
+                        "name": li.get("name", ""),
+                        "path": f"{team_name} > {sp_name} > {li.get('name','')}",
+                        "url":  f"https://app.clickup.com/{team['id']}/v/li/{li['id']}",
+                    })
+        out.sort(key=lambda x: x["path"].lower())
+        return {"ok": True, "lists": out}
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode())
+            msg = body.get("err") or body.get("error") or str(body)
+        except Exception:
+            msg = str(e)
+        return {"ok": False, "error": msg}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def test_clickup(api_key: str, list_url: str) -> dict[str, Any]:
     import urllib.request, urllib.error
     if not api_key or not list_url:
@@ -955,6 +1058,43 @@ class API:
 
     def test_clickup(self, api_key: str, list_url: str):
         return test_clickup(api_key, list_url)
+
+    # --- account / list discovery (powers the modal dropdowns) ----------- #
+    def list_meta_ad_accounts(self, token: str = "", connection_id: str = ""):
+        """
+        Return every Meta ad account the given token can see.
+        If `token` is empty and `connection_id` is provided, use the saved
+        token from that connection (so the user doesn't have to re-paste it
+        when editing an existing connection).
+        """
+        if not token and connection_id:
+            cfg = load_config()
+            conn = find_connection(cfg, connection_id)
+            if conn:
+                token = conn.get("meta_access_token", "")
+        if not token:
+            return {"ok": False, "error": "No Meta token available"}
+        return list_meta_ad_accounts(token)
+
+    def list_clickup_lists(self, api_key: str = "", connection_id: str = ""):
+        """
+        Return every ClickUp list visible to the given API key.
+        Resolution order for the key:
+          1. The `api_key` argument (if non-empty)
+          2. The saved key on `connection_id` (if provided)
+          3. The Defaults clickup_api_key
+        """
+        if not api_key:
+            cfg = load_config()
+            if connection_id:
+                conn = find_connection(cfg, connection_id)
+                if conn and conn.get("clickup_api_key"):
+                    api_key = conn["clickup_api_key"]
+            if not api_key:
+                api_key = cfg.get("defaults", {}).get("clickup_api_key", "")
+        if not api_key:
+            return {"ok": False, "error": "No ClickUp API key available — set one in Defaults or paste one above"}
+        return list_clickup_lists(api_key)
 
     def verify_connection(self, connection_id: str):
         """Live end-to-end readiness check for one connection."""
