@@ -348,17 +348,18 @@ def get_meta_ads_with_status():
     if not META_TOKEN or not AD_ACCOUNT_ID:
         raise ValueError("META_ACCESS_TOKEN and META_AD_ACCOUNT_ID must be set in .env")
 
+    log.info("Fetching Meta ads (with status + created_time)...")
     all_ads = []
     url = f"{META_GRAPH}/act_{AD_ACCOUNT_ID}/ads"
     params = {
         "access_token": META_TOKEN,
-        # `created_time` is what we use for the "Reporting starts" field
-        # (the date the ad was created / began running). Without this in the
-        # field list Meta returns null.
         "fields": "id,name,effective_status,adset_id,created_time",
         "limit": 500,
     }
+    page_num = 0
     while url:
+        page_num += 1
+        log.info(f"  Meta ads page {page_num}: requesting...")
         data = api_get(url, params=params, label="Meta Ads List")
         if "error" in data:
             err = data["error"]
@@ -367,17 +368,19 @@ def get_meta_ads_with_status():
             raise RuntimeError(f"Meta API error: {err.get('message', data)}")
         batch = data.get("data", [])
         all_ads.extend(batch)
+        log.info(f"  Meta ads page {page_num}: +{len(batch)} ads (running total: {len(all_ads)})")
         url = data.get("paging", {}).get("next")
         params = None
 
-    log.info(f"Fetched {len(all_ads)} Meta ads (with delivery status)")
+    log.info(f"Done. Fetched {len(all_ads)} Meta ads total.")
     return all_ads
 
 def get_meta_insights(ad_ids=None):
     """
-    Fetch yesterday's (or DATE_PRESET) insights.
+    Fetch insights for the configured DATE_PRESET.
     If ad_ids provided, fetch only for those ads (more efficient).
     """
+    log.info(f"Fetching Meta insights (date_preset={DATE_PRESET})...")
     url = f"{META_GRAPH}/act_{AD_ACCOUNT_ID}/insights"
     params = {
         "access_token": META_TOKEN,
@@ -390,48 +393,57 @@ def get_meta_insights(ad_ids=None):
         "limit": 500,
     }
     if ad_ids:
-        # Filter to specific ads only
         params["filtering"] = json.dumps([{"field": "ad.id", "operator": "IN", "value": list(ad_ids)}])
+        log.info(f"  Filtering to {len(ad_ids)} specific ad IDs")
 
     all_insights = []
+    page_num = 0
     while url:
+        page_num += 1
+        log.info(f"  Insights page {page_num}: requesting...")
         data = api_get(url, params=params, label="Meta Insights")
         if "error" in data:
             raise RuntimeError(f"Meta Insights error: {data['error'].get('message', data)}")
         batch = data.get("data", [])
         all_insights.extend(batch)
+        log.info(f"  Insights page {page_num}: +{len(batch)} rows (running total: {len(all_insights)})")
         url = data.get("paging", {}).get("next")
         params = None
 
-    log.info(f"Fetched {len(all_insights)} Meta insight rows")
+    log.info(f"Done. Fetched {len(all_insights)} Meta insight rows total.")
     return all_insights
 
 
 # ── ClickUp API ───────────────────────────────────────────────────────────────
 
 def get_clickup_field_map():
+    log.info("Fetching ClickUp custom field definitions...")
     url = f"https://api.clickup.com/api/v2/list/{LIST_ID}/field"
     data = api_get(url, headers=CU_HEADERS, label="ClickUp Fields")
     fields = data.get("fields", [])
     field_map = {f["name"]: f["id"] for f in fields}
-    log.info(f"Discovered {len(field_map)} ClickUp custom fields")
+    log.info(f"Done. Discovered {len(field_map)} ClickUp custom fields.")
     return field_map
 
 def get_all_clickup_tasks():
+    log.info("Fetching ClickUp tasks (paginated)...")
     tasks = []
     page = 0
     while True:
+        log.info(f"  ClickUp tasks page {page}: requesting...")
         url = f"https://api.clickup.com/api/v2/list/{LIST_ID}/task"
         params = {"page": page, "include_closed": "true"}
         data = api_get(url, params=params, headers=CU_HEADERS, label=f"ClickUp Tasks (page {page})")
         batch = data.get("tasks", [])
         if not batch:
+            log.info(f"  ClickUp tasks page {page}: empty (done paginating)")
             break
         tasks.extend(batch)
+        log.info(f"  ClickUp tasks page {page}: +{len(batch)} (running total: {len(tasks)})")
         page += 1
         if len(batch) < 100:
             break
-    log.info(f"Fetched {len(tasks)} ClickUp tasks")
+    log.info(f"Done. Fetched {len(tasks)} ClickUp tasks total.")
     return tasks
 
 def update_clickup_field(task_id, field_id, value, task_name, field_name, value_options=None):
@@ -573,6 +585,10 @@ def run_sync(title_match_fallback=False):
     title_match_fallback = title_match_fallback or os.getenv("TITLE_MATCH_FALLBACK", "0") == "1"
     run_start = datetime.utcnow().isoformat()
 
+    log.info("=" * 55)
+    log.info(f"Sync starting | date_preset={DATE_PRESET} | account=act_{AD_ACCOUNT_ID}")
+    log.info("=" * 55)
+
     stats = {
         "run_at": run_start,
         "date_preset": DATE_PRESET,
@@ -611,7 +627,7 @@ def run_sync(title_match_fallback=False):
         if code and code not in meta_by_code:
             meta_by_code[code] = ad
 
-    log.info(f"Indexed {len(meta_by_code)} Meta ads by full code")
+    log.info(f"Indexed {len(meta_by_code)} Meta ads by full alphanumeric code")
 
     # ── Phase 2: Fetch insights only for ads we'll actually need ────────────
     log.info("=== Phase 2: Fetching insights ===")
@@ -628,6 +644,10 @@ def run_sync(title_match_fallback=False):
         if ad:
             needed_ad_ids.add(ad["id"])
 
+    log.info(
+        f"Need insights for {len(needed_ad_ids)} matched Meta ads "
+        f"(out of {len(needed_codes)} task codes)"
+    )
     insights_rows = get_meta_insights(needed_ad_ids if needed_ad_ids else None)
 
     # Index insights by ad_id
@@ -641,26 +661,39 @@ def run_sync(title_match_fallback=False):
     meta_by_id = {ad["id"]: ad for ad in meta_ads_list}
 
     # ── Phase 3: Match & Update ──────────────────────────────────────────────
-    log.info("=== Phase 3: Matching & Update ===")
+    log.info(f"=== Phase 3: Matching & Update ({len(cu_tasks)} tasks to scan) ===")
+
+    total_tasks = len(cu_tasks)
+    processed = 0
 
     for task in cu_tasks:
+        processed += 1
         task_name   = task.get("name", "")
         task_id     = task["id"]
         task_status = get_task_status(task)
         ad_code     = get_task_ad_code(task)
 
-        # ── Status filter: only sync 'Ready to Launch' and 'Running Analytics' ──
+        # Periodic progress beat so the user sees the loop moving
+        if processed % 25 == 0 or processed == total_tasks:
+            log.info(
+                f"  Progress: {processed}/{total_tasks} tasks scanned "
+                f"(synced={len(stats['synced'])}, "
+                f"skipped_status={len(stats.get('skipped_status', []))}, "
+                f"skipped_not_meta={len(stats['skipped_not_meta'])})"
+            )
+
+        # ── Status filter: only sync the last three columns ─────────────────
         if task_status not in CU_SYNCABLE_STATUSES:
             stats.setdefault("skipped_status", []).append(
                 {"task": task_name, "status": task_status}
             )
+            log.debug(f"  [SKIP-status] {task_name[:50]} (status: {task_status})")
             continue
 
         # ── Safety: never write Meta data to a non-Meta task ────────────────
-        # (Vibe / TikTok / Pintrest tasks with the same numeric code as a Meta
-        # ad would otherwise silently receive Meta metrics.)
         if not task_is_meta(task):
             stats["skipped_not_meta"].append({"task": task_name, "code": ad_code})
+            log.info(f"  [SKIP-not-meta] {task_name[:60]} (code: {ad_code})")
             continue
 
         # ── Find the matching Meta ad ────────────────────────────────────────
@@ -685,12 +718,13 @@ def run_sync(title_match_fallback=False):
                     match_method = f"title-only(score={score:.2f})"
             else:
                 stats["skipped_no_code"].append(task_name)
+                log.info(f"  [SKIP-no-code] {task_name[:60]}")
                 continue
 
         if not meta_ad:
             if ad_code:
-                log.debug(f"No Meta match for code '{ad_code}' (task: '{task_name}')")
                 stats["skipped_no_match"].append({"task": task_name, "code": ad_code})
+                log.info(f"  [SKIP-no-meta-match] {task_name[:50]} (code: {ad_code})")
             continue
 
         meta_status = meta_ad.get("effective_status", "")
