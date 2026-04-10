@@ -83,13 +83,17 @@ logging.basicConfig(
 log = logging.getLogger("sync_engine")
 
 # ── ClickUp status names (from list discovery) ────────────────────────────
+# All comparisons are lowercased — status names are normalized via
+# get_task_status() which calls .lower(). The actual ClickUp statuses on the
+# Creative Process List are: 'launch-ready', 'running - analytics', 'Closed'.
+CU_STATUS_LAUNCH  = "launch-ready"
 CU_STATUS_RUNNING = "running - analytics"
 CU_STATUS_CLOSED  = "closed"
-CU_STATUS_LAUNCH  = "launch-ready"
 
-# The sync only touches tasks in these two statuses. Tasks in any other
-# status (concept ideation, in production, closed, etc.) are skipped.
-CU_SYNCABLE_STATUSES = {CU_STATUS_LAUNCH, CU_STATUS_RUNNING}
+# The sync only touches tasks in these three statuses. Anything earlier in
+# the workflow (concept ideation → design → revisions → final-approval) is
+# skipped — those cards aren't ready to receive Meta data yet.
+CU_SYNCABLE_STATUSES = {CU_STATUS_LAUNCH, CU_STATUS_RUNNING, CU_STATUS_CLOSED}
 
 # Ad delivery dropdown option IDs (from the ClickUp field definition)
 CU_AD_DELIVERY_FIELD_ID = "4cb0a559-b354-4f96-ab60-80435bd13794"
@@ -694,12 +698,14 @@ def run_sync(title_match_fallback=False):
         meta_is_inactive = meta_status in META_INACTIVE_STATUSES
         task_errors = []
 
-        # ── Active/inactive sync (simplified) ────────────────────────────────
+        # ── Active/inactive sync ─────────────────────────────────────────────
         #   Meta ACTIVE   → Ad delivery = active
         #   Meta INACTIVE → Ad delivery = inactive
-        # Plus task status transitions for tasks that just started/ended:
+        # Status transitions only happen for non-closed tasks:
         #   launch-ready → running  when Meta goes ACTIVE
         #   running      → closed   when Meta goes INACTIVE
+        # Closed tasks keep their delivery field updated but are never moved
+        # back to running, even if their Meta ad becomes active again.
         if meta_is_active:
             update_clickup_ad_delivery(task_id, "active", task_name)
             if task_status == CU_STATUS_LAUNCH:
