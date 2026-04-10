@@ -574,6 +574,10 @@
           <div class="hint">Scheduled times use this timezone. GitHub Actions runs in UTC — we convert for you. Note: times may shift by 1 hour during DST — just re-save the schedule to correct.</div>
         </div>
 
+        <h2>Connections to include</h2>
+        <p class="sub" style="margin:0 0 10px">Each checked connection becomes a separate step in the GitHub Actions workflow. Unchecked connections are skipped on the schedule but can still be run manually from the Connections tab.</p>
+        <div id="sched-connection-list" style="background:var(--bg-3); border:1px solid var(--border); border-radius:8px; padding:6px 0; margin-bottom:12px"></div>
+
         <div class="btn-row">
           <button class="btn" id="sched-save-btn">Save &amp; Enable</button>
           <button class="btn ghost" id="sched-trigger-btn">Run Now (remote)</button>
@@ -1071,11 +1075,46 @@ async function refreshScheduleView() {
     document.getElementById('sched-weekday').value = String(status.weekday || 1);
     populateTimezones(status.timezone || 'America/New_York');
     updateSchedFieldsVisibility();
+    await renderScheduleConnections();
     await loadRuns();
   } else {
     disconnected.classList.remove('hidden');
     connected.classList.add('hidden');
   }
+}
+
+async function renderScheduleConnections() {
+  const container = document.getElementById('sched-connection-list');
+  const list = await window.pywebview.api.list_connections();
+  if (!list || list.length === 0) {
+    container.innerHTML = '<div style="padding:14px; color:var(--fg-dim); text-align:center">No connections yet. Add one from the Connections tab.</div>';
+    return;
+  }
+  container.innerHTML = list.map(c => {
+    const checked = c.scheduled ? 'checked' : '';
+    const last = c.last_run_at ? relativeTime(c.last_run_at) : 'never run';
+    let pill = '<span class="pill dim" style="margin-left:8px">never</span>';
+    if (c.last_run_status === 'complete') pill = '<span class="pill good" style="margin-left:8px">✓</span>';
+    else if (c.last_run_status === 'failed') pill = '<span class="pill bad" style="margin-left:8px">✗</span>';
+    return `
+      <label style="display:flex; align-items:center; gap:10px; padding:8px 14px; cursor:pointer; border-bottom:1px solid var(--border)">
+        <input type="checkbox" data-conn-id="${escapeHtml(c.id)}" ${checked} class="sched-conn-checkbox">
+        <div style="flex:1">
+          <div style="font-weight:500">${escapeHtml(c.name || c.id)}${pill}</div>
+          <div style="font-size:11px; color:var(--fg-dim); font-family:var(--mono)">act_${escapeHtml(c.meta_ad_account_id)} · last: ${last}</div>
+        </div>
+      </label>
+    `;
+  }).join('');
+  // Last item shouldn't have a border
+  const lastChild = container.lastElementChild;
+  if (lastChild) lastChild.style.borderBottom = 'none';
+  // Wire each checkbox to immediately persist scheduled state
+  container.querySelectorAll('.sched-conn-checkbox').forEach(cb => {
+    cb.addEventListener('change', async () => {
+      await window.pywebview.api.set_connection_scheduled(cb.dataset.connId, cb.checked);
+    });
+  });
 }
 
 async function populateTimezones(selected) {

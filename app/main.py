@@ -1200,8 +1200,9 @@ class API:
     def install_schedule(self, schedule: dict):
         """
         Provision/refresh the customer's private GitHub repo with the sync
-        code, secrets, and workflow YAML. `schedule` is {frequency, time,
-        timezone, weekday}.
+        code, namespaced secrets per scheduled connection, and a multi-step
+        workflow YAML. `schedule` is {frequency, time, timezone, weekday}.
+        Only connections with scheduled=True are included in the cron run.
         """
         cfg = load_config()
         if not cfg.get("github_token"):
@@ -1217,8 +1218,30 @@ class API:
             if ui_key in schedule:
                 cfg[key] = schedule[ui_key]
 
+        # Build the list of connections to schedule, with each one's effective
+        # config (defaults merged with per-connection overrides).
+        scheduled = []
+        for conn in cfg.get("connections", []):
+            if not conn.get("scheduled"):
+                continue
+            eff = get_effective_config(cfg, conn["id"])
+            if not eff:
+                continue
+            scheduled.append({
+                "id":   conn["id"],
+                "name": conn.get("name", conn["id"]),
+                "effective": eff,
+            })
+
+        if not scheduled:
+            return {"ok": False, "error": "No connections are marked as scheduled. Open a connection and check 'Include in scheduled GitHub Actions runs' first."}
+
         from github_client import provision_schedule
-        result = provision_schedule(cfg, sync_engine_source=_sync_engine_files())
+        result = provision_schedule(
+            cfg,
+            sync_engine_source=_sync_engine_files(),
+            scheduled_connections=scheduled,
+        )
         if result.get("ok"):
             cfg["github_repo"] = result.get("repo", "")
             cfg["schedule_enabled"] = True
