@@ -46,14 +46,35 @@ LOG_LEVEL         = os.getenv("LOG_LEVEL", "INFO")
 # Title-match fallback: minimum word-overlap ratio (0–1) to accept a title match
 TITLE_MATCH_THRESHOLD = float(os.getenv("TITLE_MATCH_THRESHOLD", "0.35"))
 
-LIST_ID = LIST_URL.rstrip("/").split("/")[-1] if LIST_URL else ""
+# Parse list ID from the ClickUp list URL. Supports both:
+#   https://app.clickup.com/.../v/b/6-901324828380-2   (board view URL)
+#   https://app.clickup.com/.../li/901324828380        (list URL)
+def _parse_list_id(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r'6-(\d+)-', url)
+    if m:
+        return m.group(1)
+    return url.rstrip("/").split("/")[-1]
+
+LIST_ID = _parse_list_id(LIST_URL)
 
 CU_HEADERS = {"Authorization": CLICKUP_KEY, "Content-Type": "application/json"}
 META_GRAPH = "https://graph.facebook.com/v19.0"
 
-ALIAS_FILE = ROOT / "directives" / "field_aliases.md"
-LOG_DIR    = ROOT / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# Writable paths can be overridden so the bundled desktop app can redirect
+# logs and alias storage into ~/Library/Application Support/AdSync.
+_ALIAS_OVERRIDE = os.getenv("ADSYNC_ALIAS_FILE")
+_LOG_OVERRIDE   = os.getenv("ADSYNC_LOG_DIR")
+ALIAS_FILE = Path(_ALIAS_OVERRIDE) if _ALIAS_OVERRIDE else ROOT / "directives" / "field_aliases.md"
+LOG_DIR    = Path(_LOG_OVERRIDE)   if _LOG_OVERRIDE   else ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+if not ALIAS_FILE.exists():
+    try:
+        ALIAS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ALIAS_FILE.write_text("# Field Aliases (auto-maintained)\n\n## Active Aliases\n(none yet — populated on first mismatch resolution)\n")
+    except OSError:
+        pass
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -65,6 +86,10 @@ log = logging.getLogger("sync_engine")
 CU_STATUS_RUNNING = "running - analytics"
 CU_STATUS_CLOSED  = "closed"
 CU_STATUS_LAUNCH  = "launch-ready"
+
+# The sync only touches tasks in these two statuses. Tasks in any other
+# status (concept ideation, in production, closed, etc.) are skipped.
+CU_SYNCABLE_STATUSES = {CU_STATUS_LAUNCH, CU_STATUS_RUNNING}
 
 # Ad delivery dropdown option IDs (from the ClickUp field definition)
 CU_AD_DELIVERY_FIELD_ID = "4cb0a559-b354-4f96-ab60-80435bd13794"
@@ -93,6 +118,10 @@ TITLE_STOP_WORDS = {
 
 
 # ── Canonical field map (directive table) ───────────────────────────────────
+
+# Field names whose updates need value_options={"time": false} so ClickUp
+# renders them as a calendar date without time-of-day drift.
+DATE_FIELD_NAMES = {"Reporting starts", "Reporting ends"}
 
 CANONICAL_MAP = {
     "Amount spent (USD)":                       lambda r: safe_float(r.get("spend")),
@@ -138,10 +167,23 @@ def extract_roas(row):
     return None
 
 def date_to_ms(date_str):
+    """
+    Convert a YYYY-MM-DD or ISO 8601 datetime string to a Unix epoch
+    millisecond timestamp anchored at NOON UTC of the given date.
+
+    Why noon UTC: ClickUp date fields are workspace-timezone-aware and shift
+    the displayed date by the workspace's UTC offset. Anchoring at noon UTC
+    keeps the date on the correct calendar day in every timezone from UTC-11
+    to UTC+11.
+    """
     if not date_str:
         return None
+    from datetime import timezone
+    s = str(date_str)
     try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        if "T" in s:
+            s = s.split("T")[0]
+        dt = datetime.strptime(s, "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
         return int(dt.timestamp() * 1000)
     except ValueError:
         return None
@@ -306,7 +348,10 @@ def get_meta_ads_with_status():
     url = f"{META_GRAPH}/act_{AD_ACCOUNT_ID}/ads"
     params = {
         "access_token": META_TOKEN,
-        "fields": "id,name,effective_status,adset_id",
+        # `created_time` is what we use for the "Reporting starts" field
+        # (the date the ad was created / began running). Without this in the
+        # field list Meta returns null.
+        "fields": "id,name,effective_status,adset_id,created_time",
         "limit": 500,
     }
     while url:
@@ -385,12 +430,20 @@ def get_all_clickup_tasks():
     log.info(f"Fetched {len(tasks)} ClickUp tasks")
     return tasks
 
-def update_clickup_field(task_id, field_id, value, task_name, field_name):
+def update_clickup_field(task_id, field_id, value, task_name, field_name, value_options=None):
+    """
+    Update a single ClickUp custom field. Pass `value_options` for date fields,
+    e.g. value_options={"time": False} so ClickUp renders the date without
+    a time component (which avoids workspace-TZ display drift).
+    """
     if value is None:
         log.debug(f"Skipping null for '{field_name}' on '{task_name}'")
         return False
     url = f"https://api.clickup.com/api/v2/task/{task_id}/field/{field_id}"
-    result = api_post(url, {"value": value}, headers=CU_HEADERS, label=f"{task_name}/{field_name}")
+    payload = {"value": value}
+    if value_options is not None:
+        payload["value_options"] = value_options
+    result = api_post(url, payload, headers=CU_HEADERS, label=f"{task_name}/{field_name}")
     return result is not None
 
 def update_clickup_status(task_id, status, task_name):
@@ -412,19 +465,95 @@ def update_clickup_ad_delivery(task_id, delivery_key, task_name):
     )
 
 def get_task_ad_code(task):
-    """Extract the Ad## code from a task: check custom field first, then task name."""
-    # 1. Check "Ad##" custom field
+    """
+    Extract the full ad code from a task. The code preserves any leading
+    letters (e.g. 'P1002', 'V1023', 'TV1002') so two ads with the same digits
+    but different prefixes never collide.
+
+    Resolution order:
+      1. The 'Ad##' custom field value (uppercased, trimmed)
+      2. An 'Ad#XXX' / 'Ad XXX' tag in the task name
+      3. The leading alphanumeric code at the start of the task name (e.g. 'TV1002_…')
+    """
+    # 1. Custom field
     for cf in task.get("custom_fields", []):
         if cf.get("id") == CU_AD_CODE_FIELD_ID:
             val = cf.get("value")
             if val and str(val).strip():
-                return str(val).strip()
+                return str(val).strip().upper()
             break
-    # 2. Fall back: extract from task name
-    m = re.search(r'(?:Ad#?)?(\d+)', task.get("name", ""), re.IGNORECASE)
+
+    name = task.get("name", "") or ""
+
+    # 2. 'Ad#XXX' or 'Ad XXX' tag anywhere in the name (preserves prefix letters)
+    m = re.search(r'Ad[#\s]?([A-Z]{0,4}\d{3,})', name, re.IGNORECASE)
     if m:
-        return m.group(1)
+        return m.group(1).upper()
+
+    # 3. Leading code: '<letters?><digits>' at the very start of the name
+    m = re.match(r'([A-Z]{1,4}\d{3,})', name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+
     return None
+
+def get_meta_ad_code(ad_name):
+    """
+    Extract the full ad code from a Meta ad name. Matches:
+      'Ad#P1002'      → 'P1002'
+      'Ad#102413'     → '102413'
+      'Ad 5 (10021)'  → '10021' (parenthesized id)
+      'V1019'         → 'V1019'
+    """
+    if not ad_name:
+        return None
+    # Highest priority: explicit 'Ad#XXX' tag
+    m = re.search(r'Ad[#\s]?([A-Z]{0,4}\d{3,})', ad_name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    # Next: parenthesized numeric id like 'Ad 5 (10021)'
+    m = re.search(r'\(([A-Z]{0,4}\d{3,})', ad_name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    # Fallback: leading alphanumeric code
+    m = re.match(r'([A-Z]{1,4}\d{3,})', ad_name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+# ── Platform safety check ──────────────────────────────────────────────────────
+
+CU_PLATFORM_FIELD_ID = "9d222463-ae48-458a-a6ee-3e86d57f9cf2"
+CU_PLATFORM_META_OPTION_ID = "0d5d6831-725c-4918-b09a-4580cb244486"
+# index 0 = Meta in the dropdown
+CU_PLATFORM_META_INDEX = 0
+
+def task_is_meta(task):
+    """
+    True if a ClickUp task is a Meta ad. Avoids cross-platform contamination
+    (e.g. Vibe / TikTok / Pintrest tasks accidentally receiving Meta data).
+
+    Logic:
+      - If the Platform dropdown is set, it must be 'Meta'
+      - If the Platform dropdown is unset, fall back to the task name:
+        the name must contain '_Meta_' or 'Meta_' or 'Ad#'
+    """
+    platform_value = None
+    for cf in task.get("custom_fields", []):
+        if cf.get("id") == CU_PLATFORM_FIELD_ID:
+            platform_value = cf.get("value")
+            break
+
+    if platform_value is not None:
+        # Dropdown values come back as the option index (string or int)
+        try:
+            return int(platform_value) == CU_PLATFORM_META_INDEX
+        except (TypeError, ValueError):
+            return str(platform_value) == CU_PLATFORM_META_OPTION_ID
+
+    # Platform not set — fall back to name heuristic
+    name = (task.get("name") or "").lower()
+    return ("_meta_" in name) or name.startswith("meta_") or ("ad#" in name)
 
 def get_task_status(task):
     return task.get("status", {}).get("status", "").lower()
@@ -446,8 +575,9 @@ def run_sync(title_match_fallback=False):
         "title_match_fallback": title_match_fallback,
         "synced": [],
         "status_changed": [],
-        "skipped_no_code": [],
-        "skipped_no_match": [],
+        "skipped_no_code":     [],
+        "skipped_no_match":    [],
+        "skipped_not_meta":    [],
         "errors": [],
     }
 
@@ -468,18 +598,16 @@ def run_sync(title_match_fallback=False):
 
     log.info(f"Resolved {len(resolved_field_map)}/{len(canonical_names)} metric fields")
 
-    # Build Meta ad lookup by code: {code_upper: ad}
-    # Code = any Ad\d+ substring found in the ad name
-    code_pattern = re.compile(r'(?:Ad#?)?(\d{4,})', re.IGNORECASE)
+    # Build Meta ad lookup keyed by full alphanumeric code (e.g. 'P1002', 'V1019',
+    # '102413'). Preserving the prefix prevents ads with the same digits but
+    # different prefixes (P1002 ↔ TV1002) from colliding.
     meta_by_code = {}
     for ad in meta_ads_list:
-        m = code_pattern.search(ad.get("name", ""))
-        if m:
-            code = m.group(1)
-            if code not in meta_by_code:
-                meta_by_code[code] = ad
+        code = get_meta_ad_code(ad.get("name", ""))
+        if code and code not in meta_by_code:
+            meta_by_code[code] = ad
 
-    log.info(f"Indexed {len(meta_by_code)} Meta ads by numeric code")
+    log.info(f"Indexed {len(meta_by_code)} Meta ads by full code")
 
     # ── Phase 2: Fetch insights only for ads we'll actually need ────────────
     log.info("=== Phase 2: Fetching insights ===")
@@ -517,6 +645,20 @@ def run_sync(title_match_fallback=False):
         task_status = get_task_status(task)
         ad_code     = get_task_ad_code(task)
 
+        # ── Status filter: only sync 'Ready to Launch' and 'Running Analytics' ──
+        if task_status not in CU_SYNCABLE_STATUSES:
+            stats.setdefault("skipped_status", []).append(
+                {"task": task_name, "status": task_status}
+            )
+            continue
+
+        # ── Safety: never write Meta data to a non-Meta task ────────────────
+        # (Vibe / TikTok / Pintrest tasks with the same numeric code as a Meta
+        # ad would otherwise silently receive Meta metrics.)
+        if not task_is_meta(task):
+            stats["skipped_not_meta"].append({"task": task_name, "code": ad_code})
+            continue
+
         # ── Find the matching Meta ad ────────────────────────────────────────
         meta_ad      = None
         match_method = None
@@ -526,14 +668,12 @@ def run_sync(title_match_fallback=False):
             if meta_ad:
                 match_method = f"code:{ad_code}"
             elif title_match_fallback:
-                # Try title match as fallback
                 best_ad, score = find_best_title_match(task_name, meta_ads_list)
                 if best_ad:
                     meta_ad = best_ad
                     match_method = f"title-fuzzy(score={score:.2f})"
                     log.info(f"[FUZZY] '{task_name}' → '{best_ad['ad_name']}' (score={score:.2f})")
         else:
-            # No code at all — only try title match if fallback is on
             if title_match_fallback:
                 best_ad, score = find_best_title_match(task_name, meta_ads_list)
                 if best_ad:
@@ -554,49 +694,54 @@ def run_sync(title_match_fallback=False):
         meta_is_inactive = meta_status in META_INACTIVE_STATUSES
         task_errors = []
 
-        # ── Status lifecycle management ──────────────────────────────────────
-
-        # Case A: Meta ACTIVE + task is launch-ready → flip to running
-        if meta_is_active and task_status == CU_STATUS_LAUNCH:
-            ok = update_clickup_status(task_id, CU_STATUS_RUNNING, task_name)
-            if ok:
-                update_clickup_ad_delivery(task_id, "active", task_name)
-                stats["status_changed"].append({
-                    "task": task_name, "from": task_status, "to": CU_STATUS_RUNNING, "reason": "Meta ACTIVE"
-                })
-
-        # Case B: Meta ACTIVE + task already running → keep delivery=active, update metrics
-        elif meta_is_active and task_status == CU_STATUS_RUNNING:
+        # ── Active/inactive sync (simplified) ────────────────────────────────
+        #   Meta ACTIVE   → Ad delivery = active
+        #   Meta INACTIVE → Ad delivery = inactive
+        # Plus task status transitions for tasks that just started/ended:
+        #   launch-ready → running  when Meta goes ACTIVE
+        #   running      → closed   when Meta goes INACTIVE
+        if meta_is_active:
             update_clickup_ad_delivery(task_id, "active", task_name)
-
-        # Case C: Meta INACTIVE + task is running → flip to Closed, set inactive
-        elif meta_is_inactive and task_status == CU_STATUS_RUNNING:
-            ok = update_clickup_status(task_id, CU_STATUS_CLOSED, task_name)
-            if ok:
-                update_clickup_ad_delivery(task_id, "inactive", task_name)
-                stats["status_changed"].append({
-                    "task": task_name, "from": task_status, "to": CU_STATUS_CLOSED, "reason": f"Meta {meta_status}"
-                })
-
-        # Case D: Meta INACTIVE + task already closed → update delivery field only
-        elif meta_is_inactive and task_status == CU_STATUS_CLOSED:
+            if task_status == CU_STATUS_LAUNCH:
+                ok = update_clickup_status(task_id, CU_STATUS_RUNNING, task_name)
+                if ok:
+                    stats["status_changed"].append({
+                        "task": task_name, "from": task_status,
+                        "to": CU_STATUS_RUNNING, "reason": "Meta ACTIVE",
+                    })
+        elif meta_is_inactive:
             update_clickup_ad_delivery(task_id, "inactive", task_name)
-
-        # Case E: Meta PAUSED + task is launch-ready → set not_delivering, leave status
-        elif meta_is_inactive and task_status == CU_STATUS_LAUNCH:
-            update_clickup_ad_delivery(task_id, "not_delivering", task_name)
+            if task_status == CU_STATUS_RUNNING:
+                ok = update_clickup_status(task_id, CU_STATUS_CLOSED, task_name)
+                if ok:
+                    stats["status_changed"].append({
+                        "task": task_name, "from": task_status,
+                        "to": CU_STATUS_CLOSED, "reason": f"Meta {meta_status}",
+                    })
 
         # ── Performance metrics update ────────────────────────────────────────
         insight_row = insights_by_ad_id.get(meta_ad.get("id"), {})
 
         if insight_row:
+            # Override the date keys CANONICAL_MAP reads for the Reporting fields:
+            #   Reporting starts → the Meta ad's created_time (when it began running)
+            #   Reporting ends   → today (the date this sync was run)
+            # Falls back to Meta's insight date_start if created_time is missing.
+            ad_created = meta_ad.get("created_time") or insight_row.get("date_start")
+            insight_row["date_start"] = ad_created
+            insight_row["date_stop"]  = datetime.utcnow().strftime("%Y-%m-%d")
+
             fields_updated = 0
             for canonical_name, extractor in CANONICAL_MAP.items():
                 uuid = resolved_field_map.get(canonical_name)
                 if not uuid:
                     continue
                 value = extractor(insight_row)
-                ok = update_clickup_field(task_id, uuid, value, task_name, canonical_name)
+                vopts = {"time": False} if canonical_name in DATE_FIELD_NAMES else None
+                ok = update_clickup_field(
+                    task_id, uuid, value, task_name, canonical_name,
+                    value_options=vopts,
+                )
                 if ok:
                     fields_updated += 1
                 else:
@@ -645,8 +790,10 @@ def run_sync(title_match_fallback=False):
         f"Sync complete | {DATE_PRESET}\n"
         f"  Synced (metrics):      {len(stats['synced'])} tasks\n"
         f"  Status changes:        {len(stats['status_changed'])} tasks\n"
+        f"  Skipped (wrong status):{len(stats.get('skipped_status', []))} tasks\n"
         f"  Skipped (no code):     {len(stats['skipped_no_code'])} tasks\n"
         f"  Skipped (no match):    {len(stats['skipped_no_match'])} tasks\n"
+        f"  Skipped (not Meta):    {len(stats['skipped_not_meta'])} tasks\n"
         f"  Errors:                {len(stats['errors'])} tasks\n"
         f"  Log: {log_path}\n"
         f"{'='*55}"

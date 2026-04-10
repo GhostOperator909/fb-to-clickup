@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Ad Sync by AI Simple</title>
+<style>
+  :root {
+    --bg:        #0b0e14;
+    --bg-2:      #10141c;
+    --bg-3:      #171d28;
+    --border:    #222a38;
+    --fg:        #e5eaf0;
+    --fg-dim:    #8a94a6;
+    --fg-dimmer: #55607a;
+    --accent:    #4f9cff;
+    --accent-2:  #2f7ae5;
+    --good:      #3ecf8e;
+    --warn:      #f4b740;
+    --bad:       #ef5a5a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  input, select, textarea, button { font-family: inherit; font-size: inherit; }
+
+  .layout {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+  }
+
+  /* Top nav */
+  header {
+    display: flex; align-items: center; padding: 12px 20px;
+    background: var(--bg-2); border-bottom: 1px solid var(--border);
+    gap: 16px;
+  }
+  header .brand { font-weight: 600; font-size: 15px; letter-spacing: .2px; }
+  header .brand .dim { color: var(--fg-dim); font-weight: 400; }
+  header nav { display: flex; gap: 4px; margin-left: auto; }
+  header nav button {
+    background: transparent; border: 1px solid transparent; color: var(--fg-dim);
+    padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  }
+  header nav button:hover { color: var(--fg); }
+  header nav button.active {
+    background: var(--bg-3); color: var(--fg); border-color: var(--border);
+  }
+
+  /* Main view */
+  main { overflow-y: auto; padding: 28px 32px; }
+  main::-webkit-scrollbar { width: 10px; }
+  main::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 10px; }
+
+  .view { display: none; }
+  .view.active { display: block; }
+
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 10px; color: var(--fg); }
+  .sub { color: var(--fg-dim); margin: 0 0 24px; }
+
+  .card {
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; margin-bottom: 16px;
+  }
+
+  .field { display: flex; flex-direction: column; margin-bottom: 14px; }
+  .field label { font-size: 12px; color: var(--fg-dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .4px; }
+  .field .hint { font-size: 11px; color: var(--fg-dimmer); margin-top: 4px; }
+  .field input, .field select, .field textarea {
+    background: var(--bg-3); border: 1px solid var(--border); color: var(--fg);
+    padding: 9px 10px; border-radius: 6px; outline: none;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,156,255,.15);
+  }
+
+  .row { display: flex; gap: 12px; }
+  .row > .field { flex: 1; }
+
+  button.btn {
+    background: var(--accent); border: 0; color: white;
+    padding: 9px 16px; border-radius: 6px; cursor: pointer; font-weight: 500;
+  }
+  button.btn:hover { background: var(--accent-2); }
+  button.btn:disabled { background: var(--fg-dimmer); cursor: not-allowed; }
+  button.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+  button.btn.ghost:hover { background: var(--bg-3); }
+  button.btn.danger { background: var(--bad); }
+  button.btn.good  { background: var(--good); color: #0b1d14; }
+  .btn-row { display: flex; gap: 10px; margin-top: 16px; align-items: center; }
+
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 500;
+  }
+  .pill.good { background: rgba(62,207,142,.12); color: var(--good); }
+  .pill.warn { background: rgba(244,183,64,.12); color: var(--warn); }
+  .pill.bad  { background: rgba(239,90,90,.12);  color: var(--bad); }
+  .pill.dim  { background: var(--bg-3); color: var(--fg-dim); }
+
+  /* Wizard progress */
+  .wiz-steps { display: flex; gap: 8px; margin-bottom: 24px; }
+  .wiz-steps .step {
+    flex: 1; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-2); color: var(--fg-dim); font-size: 12px;
+  }
+  .wiz-steps .step.active { border-color: var(--accent); color: var(--fg); }
+  .wiz-steps .step.done { color: var(--good); border-color: rgba(62,207,142,.35); }
+  .wiz-steps .step .num { font-weight: 600; margin-right: 6px; }
+
+  .wiz-body { min-height: 340px; }
+
+  .verify-step {
+    display: flex; align-items: flex-start; gap: 12px; padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .verify-step:last-child { border-bottom: 0; }
+  .verify-step .icon {
+    flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+  }
+  .verify-step .icon.pending { background: var(--bg-3); color: var(--fg-dim); }
+  .verify-step .icon.good { background: rgba(62,207,142,.15); color: var(--good); }
+  .verify-step .icon.bad  { background: rgba(239,90,90,.15);  color: var(--bad); }
+  .verify-step .title { font-weight: 500; }
+  .verify-step .detail { color: var(--fg-dim); font-size: 12px; margin-top: 2px; }
+  .verify-step.failed .title  { color: var(--bad); }
+  .verify-step.failed .detail {
+    color: #ffb4b4; font-size: 13px; font-weight: 500;
+    background: rgba(239,90,90,.08); border-left: 3px solid var(--bad);
+    padding: 8px 10px; border-radius: 4px; margin-top: 6px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .verify-step.failed .diag {
+    margin-top: 8px; padding: 10px 12px; border-radius: 6px;
+    background: var(--bg-3); border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
+  }
+
+  /* Log viewer */
+  .log {
+    background: #070a11; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; font-family: var(--mono); font-size: 12px;
+    height: 300px; overflow-y: auto; color: #cdd6e4; user-select: text;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .log::-webkit-scrollbar { width: 10px; }
+  .log::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 10px; }
+
+  /* Run history table */
+  .runs-table { width: 100%; border-collapse: collapse; }
+  .runs-table th, .runs-table td {
+    padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .runs-table th { color: var(--fg-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+
+  /* Connect GitHub */
+  .device-code {
+    display: inline-block; font-family: var(--mono); font-size: 28px;
+    letter-spacing: 6px; padding: 14px 22px; background: var(--bg-3);
+    border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
+    user-select: all;
+  }
+
+  /* Footer */
+  footer {
+    padding: 12px 20px; font-size: 11px; color: var(--fg-dimmer);
+    background: var(--bg-2); border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  footer a { color: var(--fg-dim); }
+
+  /* Utility */
+  .hidden { display: none !important; }
+  .spin { animation: spin 1s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .banner {
+    padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px;
+  }
+  .banner.info { background: rgba(79,156,255,.1); border: 1px solid rgba(79,156,255,.3); color: #bcd6ff; }
+  .banner.warn { background: rgba(244,183,64,.1); border: 1px solid rgba(244,183,64,.3); color: #ffe6a8; }
+  .banner.bad  { background: rgba(239,90,90,.1);  border: 1px solid rgba(239,90,90,.3);  color: #ffb5b5; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+  <header>
+    <div class="brand">Ad Sync <span class="dim">by AI Simple</span></div>
+    <nav id="nav" class="hidden">
+      <button data-view="run">Run</button>
+      <button data-view="schedule">Schedule</button>
+      <button data-view="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+
+    <!-- ============================================================ -->
+    <!-- SETUP WIZARD                                                 -->
+    <!-- ============================================================ -->
+    <div id="view-setup" class="view">
+      <h1>Welcome to Ad Sync</h1>
+      <p class="sub">Let's get your Meta and ClickUp accounts connected. Takes about 2 minutes.</p>
+
+      <div class="wiz-steps" id="wiz-steps">
+        <div class="step active" data-step="1"><span class="num">1</span>Meta</div>
+        <div class="step"        data-step="2"><span class="num">2</span>ClickUp</div>
+        <div class="step"        data-step="3"><span class="num">3</span>Settings</div>
+        <div class="step"        data-step="4"><span class="num">4</span>Verify</div>
+      </div>
+
+      <div class="card wiz-body">
+
+        <!-- Step 1: Meta -->
+        <div class="wiz-page" data-page="1">
+          <h2>Meta (Facebook) credentials</h2>
+          <p class="sub">We need an access token with the <code>ads_read</code> scope. Long-lived system user tokens are recommended.</p>
+
+          <div class="field">
+            <label>Meta access token</label>
+            <input id="meta_access_token" type="password" placeholder="EAAx..." autocomplete="off" />
+            <div class="hint">You can generate this in Meta Business Suite → Business Settings → System Users.</div>
+          </div>
+
+          <div class="field">
+            <label>Ad account ID</label>
+            <input id="meta_ad_account_id" type="text" placeholder="1174046364280347" />
+            <div class="hint">Numbers only — no <code>act_</code> prefix.</div>
+          </div>
+
+          <div class="btn-row">
+            <button class="btn ghost" id="test-meta-btn">Test connection</button>
+            <span id="test-meta-result" class="pill dim hidden"></span>
+            <div style="flex:1"></div>
+            <button class="btn" data-next="2">Next</button>
+          </div>
+        </div>
+
+        <!-- Step 2: ClickUp -->
+        <div class="wiz-page hidden" data-page="2">
+          <h2>ClickUp credentials</h2>
+          <p class="sub">Your ClickUp API key and the list you want to sync into.</p>
+
+          <div class="field">
+            <label>ClickUp API key</label>
+            <input id="clickup_api_key" type="password" placeholder="pk_..." autocomplete="off" />
+            <div class="hint">Generate at <a href="https://app.clickup.com" target="_blank">app.clickup.com</a> → Settings → Apps → API Token.</div>
+          </div>
+
+          <div class="field">
+            <label>ClickUp list URL</label>
+            <input id="clickup_list_url" type="text" placeholder="https://app.clickup.com/..." />
+            <div class="hint">Open your target list in ClickUp and paste the URL from the address bar.</div>
+          </div>
+
+          <div class="btn-row">
+            <button class="btn ghost" id="test-clickup-btn">Test connection</button>
+            <span id="test-clickup-result" class="pill dim hidden"></span>
+            <div style="flex:1"></div>
+            <button class="btn ghost" data-prev="1">Back</button>
+            <button class="btn" data-next="3">Next</button>
+          </div>
+        </div>
+
+        <!-- Step 3: Sync settings -->
+        <div class="wiz-page hidden" data-page="3">
+          <h2>Sync settings</h2>
+          <p class="sub">How far back to pull data, how to match ads, and how loud the logs should be.</p>
+
+          <div class="row">
+            <div class="field">
+              <label>Date preset</label>
+              <select id="date_preset">
+                <option value="maximum">All time (maximum ~37 months)</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="last_3d">Last 3 days</option>
+                <option value="last_7d">Last 7 days</option>
+                <option value="last_14d">Last 14 days</option>
+                <option value="last_28d">Last 28 days</option>
+                <option value="last_30d">Last 30 days</option>
+                <option value="last_90d">Last 90 days</option>
+                <option value="this_month">This month</option>
+                <option value="last_month">Last month</option>
+                <option value="this_year">This year</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Match prefix</label>
+              <input id="match_prefix" type="text" value="Ad" />
+              <div class="hint">Regex prefix used to match task names (e.g. <code>Ad01</code>).</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Log level</label>
+            <select id="log_level">
+              <option value="INFO">INFO</option>
+              <option value="DEBUG">DEBUG</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+          </div>
+
+          <div class="btn-row">
+            <div style="flex:1"></div>
+            <button class="btn ghost" data-prev="2">Back</button>
+            <button class="btn" data-next="4">Next</button>
+          </div>
+        </div>
+
+        <!-- Step 4: Verify -->
+        <div class="wiz-page hidden" data-page="4">
+          <h2>Live readiness check</h2>
+          <p class="sub">We'll verify every step end-to-end: credentials, ClickUp field mapping, a matching ad, and a real write back to ClickUp.</p>
+
+          <div id="verify-results"></div>
+
+          <div class="btn-row">
+            <button class="btn ghost" data-prev="3">Back</button>
+            <button class="btn ghost" id="run-verify-btn">Run verification</button>
+            <div style="flex:1"></div>
+            <button class="btn" id="finish-setup-btn" disabled>Finish setup</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- RUN (manual sync)                                            -->
+    <!-- ============================================================ -->
+    <div id="view-run" class="view">
+      <h1>Run Sync</h1>
+      <p class="sub">Runs locally on your Mac. Pulls Meta insights and updates matching ClickUp tasks.</p>
+
+      <div class="card">
+        <div class="btn-row" style="margin-top:0">
+          <button class="btn" id="run-sync-btn">Run Sync Now</button>
+          <button class="btn ghost" id="test-sync-btn">Test Run (no writes)</button>
+          <button class="btn ghost" id="clear-logs-btn">Clear logs</button>
+          <div style="flex:1"></div>
+          <span id="run-status-pill" class="pill dim">idle</span>
+          <span id="run-elapsed" class="pill dim hidden">0s</span>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          <strong>Test Run</strong> does everything a real sync does — pulls Meta insights, matches tasks,
+          resolves fields — but <em>doesn't write anything to ClickUp</em>. Safe to run anytime.
+        </div>
+
+        <div id="run-summary" class="hidden" style="margin-top:14px"></div>
+
+        <h2 style="margin-top:20px">Live log</h2>
+        <div id="run-log" class="log">Ready. Click "Run Sync Now" to start.</div>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SCHEDULE (GitHub Actions)                                    -->
+    <!-- ============================================================ -->
+    <div id="view-schedule" class="view">
+      <h1>Scheduled Sync</h1>
+      <p class="sub">Runs in GitHub Actions — works 24/7, no need for your computer to be on. Free for private repos.</p>
+
+      <!-- Not connected state -->
+      <div id="gh-disconnected" class="card">
+        <h2>Connect GitHub</h2>
+        <p class="sub">We'll create a private repo in your GitHub account, upload the sync code, and run it on the schedule you pick.</p>
+        <div class="btn-row">
+          <button class="btn" id="gh-connect-btn">Connect GitHub</button>
+        </div>
+      </div>
+
+      <!-- Device flow in progress -->
+      <div id="gh-device-flow" class="card hidden">
+        <h2>Authorize Ad Sync on GitHub</h2>
+        <p>In the browser we just opened, paste this code and click <strong>Authorize</strong>:</p>
+        <div class="device-code" id="device-code-display">----</div>
+        <p class="sub">Waiting for authorization… <span id="device-spinner" class="spin">⏳</span></p>
+        <div class="btn-row">
+          <button class="btn ghost" id="gh-copy-code">Copy code</button>
+          <button class="btn ghost" id="gh-cancel-flow">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Connected state -->
+      <div id="gh-connected" class="card hidden">
+        <h2>GitHub connected</h2>
+        <p class="sub">Signed in as <strong id="gh-login">—</strong> · Repo: <a id="gh-repo-link" href="#" target="_blank">—</a></p>
+
+        <h2>Schedule</h2>
+        <div class="row">
+          <div class="field">
+            <label>Frequency</label>
+            <select id="sched-frequency">
+              <option value="hourly">Every hour</option>
+              <option value="six_hourly">Every 6 hours</option>
+              <option value="daily" selected>Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </div>
+          <div class="field" id="sched-time-field">
+            <label>Time</label>
+            <input id="sched-time" type="time" value="09:00" />
+          </div>
+          <div class="field" id="sched-weekday-field" style="display:none">
+            <label>Weekday</label>
+            <select id="sched-weekday">
+              <option value="1">Monday</option>
+              <option value="2">Tuesday</option>
+              <option value="3">Wednesday</option>
+              <option value="4">Thursday</option>
+              <option value="5">Friday</option>
+              <option value="6">Saturday</option>
+              <option value="7">Sunday</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Timezone</label>
+          <select id="sched-timezone"></select>
+          <div class="hint">Scheduled times use this timezone. GitHub Actions runs in UTC — we convert for you. Note: times may shift by 1 hour during DST — just re-save the schedule to correct.</div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn" id="sched-save-btn">Save &amp; Enable</button>
+          <button class="btn ghost" id="sched-trigger-btn">Run Now (remote)</button>
+          <div style="flex:1"></div>
+          <button class="btn ghost" id="sched-disable-btn">Disable schedule</button>
+          <button class="btn danger" id="gh-disconnect-btn">Disconnect</button>
+        </div>
+
+        <div id="sched-status-banner" class="banner info hidden" style="margin-top:16px"></div>
+
+        <h2>Recent runs</h2>
+        <table class="runs-table">
+          <thead><tr><th>#</th><th>Status</th><th>When</th><th>Duration</th><th></th></tr></thead>
+          <tbody id="runs-tbody"><tr><td colspan="5" style="color:var(--fg-dim); text-align:center; padding:16px">No runs yet.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- SETTINGS                                                     -->
+    <!-- ============================================================ -->
+    <div id="view-settings" class="view">
+      <h1>Settings</h1>
+      <p class="sub">Edit credentials and sync preferences. Changes here don't automatically update the scheduled run — re-save the Schedule tab after updating.</p>
+
+      <div class="card">
+        <h2>Meta</h2>
+        <div class="field">
+          <label>Access token</label>
+          <input id="s_meta_access_token" type="password" placeholder="Leave blank to keep existing" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label>Ad account ID</label>
+          <input id="s_meta_ad_account_id" type="text" />
+        </div>
+
+        <h2>ClickUp</h2>
+        <div class="field">
+          <label>API key</label>
+          <input id="s_clickup_api_key" type="password" placeholder="Leave blank to keep existing" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label>List URL</label>
+          <input id="s_clickup_list_url" type="text" />
+        </div>
+
+        <h2>Sync</h2>
+        <div class="row">
+          <div class="field">
+            <label>Date preset</label>
+            <select id="s_date_preset">
+              <option value="maximum">All time (maximum)</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="last_7d">Last 7 days</option>
+              <option value="last_30d">Last 30 days</option>
+              <option value="last_90d">Last 90 days</option>
+              <option value="this_month">This month</option>
+              <option value="last_month">Last month</option>
+              <option value="this_year">This year</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Match prefix</label>
+            <input id="s_match_prefix" type="text" />
+          </div>
+          <div class="field">
+            <label>Log level</label>
+            <select id="s_log_level">
+              <option>INFO</option><option>DEBUG</option><option>WARNING</option><option>ERROR</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn" id="settings-save-btn">Save</button>
+          <button class="btn ghost" id="settings-verify-btn">Re-verify setup</button>
+          <div style="flex:1"></div>
+          <button class="btn ghost" id="open-logs-btn">Open log folder</button>
+        </div>
+        <div id="settings-save-msg" class="banner info hidden" style="margin-top:14px"></div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer>
+    <div>© 2026 AI Simple. All rights reserved.</div>
+    <div>
+      Support:
+      <a href="mailto:andrew@aisimple.co">andrew@aisimple.co</a>
+      · <a href="tel:+13153358779">(315) 335-8779</a>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+// =============================================================== //
+// API wrapper — pywebview exposes the Python API class at
+// window.pywebview.api.  We wait for pywebviewready before using it.
+// =============================================================== //
+
+const api = {};
+let _ready = false;
+function whenReady() {
+  return new Promise(r => {
+    if (_ready) return r();
+    window.addEventListener('pywebviewready', () => { _ready = true; r(); });
+  });
+}
+
+// =============================================================== //
+// View switching
+// =============================================================== //
+
+function showView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const v = document.getElementById('view-' + name);
+  if (v) v.classList.add('active');
+  document.querySelectorAll('#nav button').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === name);
+  });
+}
+
+document.querySelectorAll('#nav button').forEach(b => {
+  b.addEventListener('click', () => {
+    const v = b.dataset.view;
+    showView(v);
+    if (v === 'schedule') refreshScheduleView();
+    if (v === 'settings') loadSettings();
+  });
+});
+
+// =============================================================== //
+// Wizard
+// =============================================================== //
+
+let currentStep = 1;
+
+function goToStep(n) {
+  currentStep = n;
+  document.querySelectorAll('.wiz-page').forEach(p => {
+    p.classList.toggle('hidden', String(p.dataset.page) !== String(n));
+  });
+  document.querySelectorAll('#wiz-steps .step').forEach(s => {
+    const num = Number(s.dataset.step);
+    s.classList.toggle('active', num === n);
+    s.classList.toggle('done', num < n);
+  });
+}
+document.querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', () => goToStep(Number(b.dataset.next))));
+document.querySelectorAll('[data-prev]').forEach(b => b.addEventListener('click', () => goToStep(Number(b.dataset.prev))));
+
+// Test Meta
+document.getElementById('test-meta-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('test-meta-btn');
+  const pill = document.getElementById('test-meta-result');
+  pill.classList.remove('hidden', 'good', 'bad');
+  pill.classList.add('dim'); pill.textContent = 'testing…';
+  btn.disabled = true;
+  try {
+    const token = document.getElementById('meta_access_token').value.trim();
+    const accountId = document.getElementById('meta_ad_account_id').value.trim();
+    await whenReady();
+    const r = await window.pywebview.api.test_meta(token, accountId);
+    if (r.ok) {
+      pill.classList.remove('dim', 'bad'); pill.classList.add('good');
+      pill.textContent = `✓ ${r.account_name} (${r.currency})`;
+    } else {
+      pill.classList.remove('dim', 'good'); pill.classList.add('bad');
+      pill.textContent = `✗ ${r.error.slice(0, 80)}`;
+    }
+  } catch (e) {
+    pill.classList.remove('dim', 'good'); pill.classList.add('bad');
+    pill.textContent = `✗ ${String(e).slice(0, 80)}`;
+  }
+  btn.disabled = false;
+});
+
+// Test ClickUp
+document.getElementById('test-clickup-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('test-clickup-btn');
+  const pill = document.getElementById('test-clickup-result');
+  pill.classList.remove('hidden', 'good', 'bad');
+  pill.classList.add('dim'); pill.textContent = 'testing…';
+  btn.disabled = true;
+  try {
+    const key = document.getElementById('clickup_api_key').value.trim();
+    const listUrl = document.getElementById('clickup_list_url').value.trim();
+    await whenReady();
+    const r = await window.pywebview.api.test_clickup(key, listUrl);
+    if (r.ok) {
+      pill.classList.remove('dim', 'bad'); pill.classList.add('good');
+      pill.textContent = `✓ ${r.list_name} — ${r.space}`;
+    } else {
+      pill.classList.remove('dim', 'good'); pill.classList.add('bad');
+      pill.textContent = `✗ ${r.error.slice(0, 80)}`;
+    }
+  } catch (e) {
+    pill.classList.remove('dim', 'good'); pill.classList.add('bad');
+    pill.textContent = `✗ ${String(e).slice(0, 80)}`;
+  }
+  btn.disabled = false;
+});
+
+// Verify Setup — runs the full end-to-end readiness check
+async function runVerify() {
+  const container = document.getElementById('verify-results');
+  const btn = document.getElementById('run-verify-btn');
+  const finishBtn = document.getElementById('finish-setup-btn');
+
+  // First save the current wizard values (but don't mark setup_complete yet)
+  await whenReady();
+  await window.pywebview.api.save_config({
+    meta_access_token:  document.getElementById('meta_access_token').value.trim(),
+    meta_ad_account_id: document.getElementById('meta_ad_account_id').value.trim(),
+    clickup_api_key:    document.getElementById('clickup_api_key').value.trim(),
+    clickup_list_url:   document.getElementById('clickup_list_url').value.trim(),
+    date_preset:        document.getElementById('date_preset').value,
+    match_prefix:       document.getElementById('match_prefix').value.trim() || 'Ad',
+    log_level:          document.getElementById('log_level').value,
+  });
+
+  container.innerHTML = '<div class="banner info">Running verification — this may take 10–30 seconds…</div>';
+  btn.disabled = true;
+  finishBtn.disabled = true;
+
+  try {
+    const r = await window.pywebview.api.verify_setup();
+    renderVerify(r);
+    finishBtn.disabled = !r.ok;
+  } catch (e) {
+    container.innerHTML = '<div class="banner bad">' + String(e) + '</div>';
+  }
+  btn.disabled = false;
+}
+
+function renderVerify(r) {
+  const container = document.getElementById('verify-results');
+  if (!r || !r.steps) {
+    container.innerHTML = '<div class="banner bad">No response from verification</div>';
+    return;
+  }
+  let html = '';
+  for (const step of r.steps) {
+    const ic = step.ok ? 'good' : 'bad';
+    const mark = step.ok ? '✓' : '✗';
+    let extra = '';
+
+    // Field-mapping step: show the exact mapping so the user can confirm
+    // which ClickUp fields will receive data from Meta.
+    if (step.name === 'ClickUp field mapping' && step.data) {
+      const resolved = step.data.resolved || {};
+      const missing  = step.data.missing  || [];
+      const resolvedRows = Object.entries(resolved).map(([canonical, info]) => `
+        <tr>
+          <td style="color:var(--good);width:22px">✓</td>
+          <td>${escapeHtml(canonical)}</td>
+          <td style="color:var(--fg-dim)">→</td>
+          <td style="color:var(--fg)"><code>${escapeHtml(info.clickup_name)}</code></td>
+        </tr>`).join('');
+      const missingRows = missing.map(name => `
+        <tr>
+          <td style="color:var(--warn);width:22px">—</td>
+          <td>${escapeHtml(name)}</td>
+          <td colspan="2" style="color:var(--fg-dim)">not present on the ClickUp list (will be skipped)</td>
+        </tr>`).join('');
+      extra = `
+        <div style="margin-top:10px; background:var(--bg-3); border:1px solid var(--border); border-radius:6px; padding:10px 12px">
+          <div style="font-size:11px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:.4px; margin-bottom:6px">
+            Meta metric → ClickUp custom field
+          </div>
+          <table style="width:100%; font-size:12px; font-family:var(--mono); border-collapse:collapse">
+            ${resolvedRows}${missingRows}
+          </table>
+        </div>`;
+    }
+
+    // Matching step: show which specific task/ad was matched
+    if (step.name === 'Task ↔ Meta ad matching' && step.data && step.ok) {
+      extra = `
+        <div style="margin-top:10px; background:var(--bg-3); border:1px solid var(--border); border-radius:6px; padding:10px 12px; font-size:12px">
+          <div><span style="color:var(--fg-dim)">ClickUp task:</span> ${escapeHtml(step.data.task_name)}</div>
+          <div><span style="color:var(--fg-dim)">Meta ad:</span> ${escapeHtml(step.data.meta_ad)}</div>
+          <div><span style="color:var(--fg-dim)">Ad code:</span> <code>${escapeHtml(step.data.ad_code)}</code> · <span style="color:var(--fg-dim)">Sample spend:</span> $${escapeHtml(String(step.data.sample_spend ?? '0'))}</div>
+        </div>`;
+    }
+
+    // Write test: show value written vs read back
+    if (step.name === 'Live write-test' && step.data && step.ok) {
+      extra = `
+        <div style="margin-top:10px; background:var(--bg-3); border:1px solid var(--border); border-radius:6px; padding:10px 12px; font-size:12px">
+          <div><span style="color:var(--fg-dim)">Wrote:</span> <code>${escapeHtml(String(step.data.wrote))}</code></div>
+          <div><span style="color:var(--fg-dim)">Read back:</span> <code>${escapeHtml(String(step.data.read_back))}</code></div>
+          <div style="color:var(--good); margin-top:4px">Round-trip confirmed — ClickUp is accepting writes from this app.</div>
+        </div>`;
+    }
+
+    // For any FAILED step, show the raw step data (if any) as a diagnostic
+    // panel so the user can see exactly what the backend saw.
+    if (!step.ok && step.data) {
+      extra += `<div class="diag">${escapeHtml(JSON.stringify(step.data, null, 2))}</div>`;
+    }
+
+    const stepClass = step.ok ? 'verify-step' : 'verify-step failed';
+    html += `
+      <div class="${stepClass}">
+        <div class="icon ${ic}">${mark}</div>
+        <div style="flex:1; min-width:0">
+          <div class="title">${escapeHtml(step.name)}</div>
+          <div class="detail">${escapeHtml(step.detail || '(no detail returned)')}</div>
+          ${extra}
+        </div>
+      </div>`;
+  }
+  if (r.ok) {
+    html += '<div class="banner" style="background:rgba(62,207,142,.1); border:1px solid rgba(62,207,142,.3); color:#a6e9c5; margin-top:14px">All checks passed — ready to sync.</div>';
+  } else {
+    html += '<div class="banner bad" style="margin-top:14px">One or more checks failed. Fix the issue and re-run the check.</div>';
+  }
+  container.innerHTML = html;
+}
+
+document.getElementById('run-verify-btn').addEventListener('click', runVerify);
+
+document.getElementById('finish-setup-btn').addEventListener('click', async () => {
+  await whenReady();
+  await window.pywebview.api.save_config({}); // sets setup_complete=true server-side
+  document.getElementById('nav').classList.remove('hidden');
+  showView('run');
+});
+
+// =============================================================== //
+// Run tab
+// =============================================================== //
+
+let runPollInterval = null;
+
+async function startSyncRun(dryRun) {
+  const runBtn = document.getElementById('run-sync-btn');
+  const testBtn = document.getElementById('test-sync-btn');
+  const log = document.getElementById('run-log');
+  const pill = document.getElementById('run-status-pill');
+  const elapsed = document.getElementById('run-elapsed');
+  const summary = document.getElementById('run-summary');
+
+  runBtn.disabled = true;
+  testBtn.disabled = true;
+  log.textContent = dryRun
+    ? '=== TEST RUN — no data will be written to ClickUp ===\n'
+    : '';
+  summary.classList.add('hidden');
+  pill.className = 'pill warn';
+  pill.textContent = dryRun ? 'testing' : 'running';
+  elapsed.classList.remove('hidden');
+
+  await whenReady();
+  const start = await window.pywebview.api.run_sync(dryRun);
+  if (!start.ok) {
+    log.textContent += 'Error: ' + (start.error || 'failed to start');
+    runBtn.disabled = false;
+    testBtn.disabled = false;
+    pill.className = 'pill bad';
+    pill.textContent = 'failed';
+    return;
+  }
+
+  if (runPollInterval) clearInterval(runPollInterval);
+  runPollInterval = setInterval(async () => {
+    try {
+      const lines = await window.pywebview.api.drain_logs();
+      if (lines && lines.length) {
+        log.textContent += lines.join('\n') + '\n';
+        log.scrollTop = log.scrollHeight;
+      }
+      const state = await window.pywebview.api.get_run_state();
+      if (state.elapsed != null) elapsed.textContent = state.elapsed + 's';
+      if (!state.running) {
+        clearInterval(runPollInterval);
+        runPollInterval = null;
+        runBtn.disabled = false;
+        testBtn.disabled = false;
+        pill.className = 'pill ' + (state.status === 'complete' ? 'good' : 'bad');
+        pill.textContent = state.status + (dryRun ? ' (test)' : '');
+        if (state.last_result) {
+          summary.classList.remove('hidden');
+          const label = dryRun ? 'Would sync' : 'Synced';
+          const banner = dryRun
+            ? '<div class="banner info">Test run complete — <strong>no writes</strong> were sent to ClickUp. Results show what <em>would</em> have happened.</div>'
+            : '';
+          summary.innerHTML = banner + `
+            <div class="banner info">
+              ${label} <strong>${state.last_result.synced}</strong> tasks ·
+              Status changes <strong>${state.last_result.status_changed}</strong> ·
+              Skipped <strong>${state.last_result.skipped}</strong> ·
+              Errors <strong>${state.last_result.errors}</strong>
+            </div>`;
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, 500);
+}
+
+document.getElementById('run-sync-btn').addEventListener('click', () => startSyncRun(false));
+document.getElementById('test-sync-btn').addEventListener('click', () => startSyncRun(true));
+
+document.getElementById('clear-logs-btn').addEventListener('click', async () => {
+  await whenReady();
+  await window.pywebview.api.clear_logs();
+  document.getElementById('run-log').textContent = 'Cleared.';
+  document.getElementById('run-summary').classList.add('hidden');
+});
+
+// =============================================================== //
+// Schedule tab
+// =============================================================== //
+
+let devicePoll = null;
+
+async function refreshScheduleView() {
+  await whenReady();
+  const status = await window.pywebview.api.github_status();
+  const disconnected = document.getElementById('gh-disconnected');
+  const flow = document.getElementById('gh-device-flow');
+  const connected = document.getElementById('gh-connected');
+  flow.classList.add('hidden');
+
+  if (status.connected) {
+    disconnected.classList.add('hidden');
+    connected.classList.remove('hidden');
+    document.getElementById('gh-login').textContent = status.login || '—';
+    const repo = status.repo || '';
+    const link = document.getElementById('gh-repo-link');
+    if (repo) {
+      link.textContent = repo;
+      link.href = `https://github.com/${repo}`;
+    } else {
+      link.textContent = '(not provisioned yet — save schedule to create)';
+      link.href = '#';
+    }
+    document.getElementById('sched-frequency').value = status.frequency || 'daily';
+    document.getElementById('sched-time').value = status.time || '09:00';
+    document.getElementById('sched-weekday').value = String(status.weekday || 1);
+    populateTimezones(status.timezone || 'America/New_York');
+    updateSchedFieldsVisibility();
+    await loadRuns();
+  } else {
+    disconnected.classList.remove('hidden');
+    connected.classList.add('hidden');
+  }
+}
+
+async function populateTimezones(selected) {
+  const sel = document.getElementById('sched-timezone');
+  if (sel.options.length === 0) {
+    const list = await window.pywebview.api.list_timezones();
+    for (const tz of list) {
+      const opt = document.createElement('option');
+      opt.value = tz.id; opt.textContent = tz.label;
+      sel.appendChild(opt);
+    }
+  }
+  sel.value = selected;
+}
+
+function updateSchedFieldsVisibility() {
+  const freq = document.getElementById('sched-frequency').value;
+  document.getElementById('sched-time-field').style.display = (freq === 'hourly' || freq === 'six_hourly') ? 'none' : '';
+  document.getElementById('sched-weekday-field').style.display = (freq === 'weekly') ? '' : 'none';
+}
+document.getElementById('sched-frequency').addEventListener('change', updateSchedFieldsVisibility);
+
+document.getElementById('gh-connect-btn').addEventListener('click', async () => {
+  await whenReady();
+  const r = await window.pywebview.api.github_start_device_flow();
+  if (!r.ok) { alert(r.error); return; }
+  document.getElementById('gh-disconnected').classList.add('hidden');
+  document.getElementById('gh-device-flow').classList.remove('hidden');
+  document.getElementById('device-code-display').textContent = r.user_code;
+  // Open browser to verification URI
+  window.open(r.verification_uri, '_blank');
+  // Start polling
+  if (devicePoll) clearTimeout(devicePoll);
+  const poll = async () => {
+    const result = await window.pywebview.api.github_poll_device_flow(r.device_code, r.interval || 5);
+    if (result.ok) {
+      await refreshScheduleView();
+    } else {
+      alert(result.error);
+      document.getElementById('gh-device-flow').classList.add('hidden');
+      document.getElementById('gh-disconnected').classList.remove('hidden');
+    }
+  };
+  devicePoll = setTimeout(poll, 500);
+});
+
+document.getElementById('gh-cancel-flow').addEventListener('click', () => {
+  if (devicePoll) { clearTimeout(devicePoll); devicePoll = null; }
+  document.getElementById('gh-device-flow').classList.add('hidden');
+  document.getElementById('gh-disconnected').classList.remove('hidden');
+});
+
+document.getElementById('gh-copy-code').addEventListener('click', () => {
+  const code = document.getElementById('device-code-display').textContent;
+  navigator.clipboard?.writeText(code);
+});
+
+document.getElementById('gh-disconnect-btn').addEventListener('click', async () => {
+  if (!confirm('Disconnect this app from GitHub? Scheduled syncs will stop.')) return;
+  await whenReady();
+  await window.pywebview.api.github_disconnect();
+  await refreshScheduleView();
+});
+
+document.getElementById('sched-save-btn').addEventListener('click', async () => {
+  const banner = document.getElementById('sched-status-banner');
+  banner.className = 'banner info';
+  banner.classList.remove('hidden');
+  banner.textContent = 'Provisioning your GitHub repo and workflow…';
+  await whenReady();
+  const r = await window.pywebview.api.install_schedule({
+    frequency: document.getElementById('sched-frequency').value,
+    time:      document.getElementById('sched-time').value,
+    timezone:  document.getElementById('sched-timezone').value,
+    weekday:   Number(document.getElementById('sched-weekday').value),
+  });
+  if (r.ok) {
+    banner.className = 'banner info';
+    banner.innerHTML = `Schedule active. Repo: <a href="${r.url}" target="_blank">${r.repo}</a> · UTC cron: <code>${r.cron}</code>`;
+    await refreshScheduleView();
+  } else {
+    banner.className = 'banner bad';
+    banner.textContent = 'Failed: ' + r.error;
+  }
+});
+
+document.getElementById('sched-disable-btn').addEventListener('click', async () => {
+  if (!confirm('Disable the scheduled sync? You can re-enable it any time.')) return;
+  await whenReady();
+  const r = await window.pywebview.api.uninstall_schedule();
+  const banner = document.getElementById('sched-status-banner');
+  banner.classList.remove('hidden');
+  banner.className = r.ok ? 'banner info' : 'banner bad';
+  banner.textContent = r.ok ? 'Schedule disabled.' : ('Failed: ' + r.error);
+});
+
+document.getElementById('sched-trigger-btn').addEventListener('click', async () => {
+  await whenReady();
+  const r = await window.pywebview.api.trigger_remote_run();
+  const banner = document.getElementById('sched-status-banner');
+  banner.classList.remove('hidden');
+  banner.className = r.ok ? 'banner info' : 'banner bad';
+  banner.textContent = r.ok ? 'Remote run dispatched. It will appear in "Recent runs" shortly.' : ('Failed: ' + r.error);
+  setTimeout(loadRuns, 3000);
+});
+
+async function loadRuns() {
+  await whenReady();
+  const r = await window.pywebview.api.list_runs(20);
+  const tbody = document.getElementById('runs-tbody');
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--bad); text-align:center; padding:16px">${escapeHtml(r.error)}</td></tr>`;
+    return;
+  }
+  const runs = r.runs || [];
+  if (runs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--fg-dim); text-align:center; padding:16px">No runs yet. ${r.note || ''}</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = runs.map(run => {
+    let statusPill = '<span class="pill dim">?</span>';
+    if (run.status === 'completed') {
+      if (run.conclusion === 'success') statusPill = '<span class="pill good">success</span>';
+      else if (run.conclusion === 'failure') statusPill = '<span class="pill bad">failure</span>';
+      else statusPill = `<span class="pill warn">${escapeHtml(run.conclusion || 'unknown')}</span>`;
+    } else if (run.status === 'in_progress') {
+      statusPill = '<span class="pill warn">running</span>';
+    } else if (run.status === 'queued') {
+      statusPill = '<span class="pill dim">queued</span>';
+    }
+    const when = relativeTime(run.created_at);
+    const dur = run.duration_ms != null ? Math.round(run.duration_ms / 1000) + 's' : '—';
+    return `<tr>
+      <td>#${run.run_number}</td>
+      <td>${statusPill}</td>
+      <td title="${run.created_at}">${when}</td>
+      <td>${dur}</td>
+      <td><a href="${run.html_url}" target="_blank">View →</a></td>
+    </tr>`;
+  }).join('');
+}
+
+// =============================================================== //
+// Settings tab
+// =============================================================== //
+
+async function loadSettings() {
+  await whenReady();
+  const c = await window.pywebview.api.get_config();
+  document.getElementById('s_meta_ad_account_id').value = c.meta_ad_account_id || '';
+  document.getElementById('s_clickup_list_url').value = c.clickup_list_url || '';
+  document.getElementById('s_date_preset').value = c.date_preset || 'maximum';
+  document.getElementById('s_match_prefix').value = c.match_prefix || 'Ad';
+  document.getElementById('s_log_level').value = c.log_level || 'INFO';
+  // Tokens never echoed back — placeholder indicates status
+  document.getElementById('s_meta_access_token').placeholder = c.meta_access_token_set ? '•••••••• (saved — leave blank to keep)' : 'Not set';
+  document.getElementById('s_clickup_api_key').placeholder   = c.clickup_api_key_set   ? '•••••••• (saved — leave blank to keep)' : 'Not set';
+}
+
+document.getElementById('settings-save-btn').addEventListener('click', async () => {
+  await whenReady();
+  const payload = {
+    meta_access_token:  document.getElementById('s_meta_access_token').value,
+    meta_ad_account_id: document.getElementById('s_meta_ad_account_id').value.trim(),
+    clickup_api_key:    document.getElementById('s_clickup_api_key').value,
+    clickup_list_url:   document.getElementById('s_clickup_list_url').value.trim(),
+    date_preset:        document.getElementById('s_date_preset').value,
+    match_prefix:       document.getElementById('s_match_prefix').value.trim() || 'Ad',
+    log_level:          document.getElementById('s_log_level').value,
+  };
+  await window.pywebview.api.save_config(payload);
+  const msg = document.getElementById('settings-save-msg');
+  msg.classList.remove('hidden', 'bad');
+  msg.className = 'banner info';
+  msg.textContent = 'Saved. If you have a scheduled sync, re-save the Schedule tab to push the new credentials to GitHub.';
+  // Clear password fields after save
+  document.getElementById('s_meta_access_token').value = '';
+  document.getElementById('s_clickup_api_key').value = '';
+  loadSettings();
+});
+
+document.getElementById('settings-verify-btn').addEventListener('click', async () => {
+  showView('setup');
+  goToStep(4);
+  runVerify();
+});
+
+document.getElementById('open-logs-btn').addEventListener('click', async () => {
+  await whenReady();
+  await window.pywebview.api.open_log_dir();
+});
+
+// =============================================================== //
+// Helpers
+// =============================================================== //
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function relativeTime(iso) {
+  if (!iso) return '—';
+  const then = new Date(iso).getTime();
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60)   return secs + 's ago';
+  if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.round(secs / 3600) + 'h ago';
+  return Math.round(secs / 86400) + 'd ago';
+}
+
+// =============================================================== //
+// Boot
+// =============================================================== //
+
+window.addEventListener('pywebviewready', async () => {
+  _ready = true;
+  const cfg = await window.pywebview.api.get_config();
+  if (cfg.setup_complete) {
+    document.getElementById('nav').classList.remove('hidden');
+    showView('run');
+  } else {
+    showView('setup');
+    goToStep(1);
+  }
+});
+
+// Fallback: show setup view immediately in case pywebview is slow to init
+showView('setup');
+goToStep(1);
+</script>
+
+</body>
+</html>
