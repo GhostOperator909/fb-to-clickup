@@ -138,16 +138,22 @@ class _ListHandler(logging.Handler):
 
 class SyncRunner:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # RLock (reentrant) instead of Lock so the same thread can re-acquire
+        # the lock without deadlocking. This is essential because the engine's
+        # logger calls _ListHandler.emit() from inside log.info(), and emit()
+        # tries to acquire the same lock that the worker thread may already
+        # hold via _append() in the same call chain.
+        self._lock = threading.RLock()
         self._log_lines: list[str] = []
         self._cursor = 0
         self._running = False
-        self._status = "idle"    # idle | running | complete | failed
+        self._status = "idle"    # idle | running | complete | failed | cancelled
         self._started_at: float | None = None
         self._finished_at: float | None = None
         self._last_result: dict | None = None
         self._last_error: str | None = None
         self._thread: threading.Thread | None = None
+        self._cancel_event = threading.Event()
 
     # -- public (called from API class) ------------------------------------- #
 
@@ -164,13 +170,24 @@ class SyncRunner:
                 "last_result": self._last_result,
                 "last_error":  self._last_error,
                 "log_count":   len(self._log_lines),
+                "cancel_requested": self._cancel_event.is_set(),
             }
 
     def drain_logs(self) -> list[str]:
+        # Snapshot under the lock, but return a copy so the JS bridge never
+        # holds onto a reference into our internal list.
         with self._lock:
-            new_lines = self._log_lines[self._cursor:]
+            new_lines = list(self._log_lines[self._cursor:])
             self._cursor = len(self._log_lines)
-            return new_lines
+        return new_lines
+
+    def cancel(self) -> dict[str, Any]:
+        """Set the cancel flag. The runner checks it between phases."""
+        if not self._running:
+            return {"ok": False, "error": "Nothing is running"}
+        self._cancel_event.set()
+        self._append("⚠ Cancel requested — stopping after current operation…")
+        return {"ok": True}
 
     def clear_logs(self) -> None:
         with self._lock:
@@ -191,6 +208,7 @@ class SyncRunner:
             self._cursor = 0
             self._last_result = None
             self._last_error = None
+            self._cancel_event.clear()
         # Give the UI an immediate heartbeat so the log pane never looks frozen.
         self._append(
             "TEST RUN — no writes will be sent to ClickUp"
@@ -212,6 +230,12 @@ class SyncRunner:
             self._append("Applying config → environment")
             apply_config_to_env(cfg)
 
+            if self._cancel_event.is_set():
+                self._append("Cancelled before engine load.")
+                with self._lock:
+                    self._status = "cancelled"
+                return
+
             # Make sure the repo root is on sys.path so `executions.sync_engine` imports.
             root = app_root()
             if str(root) not in sys.path:
@@ -232,36 +256,87 @@ class SyncRunner:
             engine.log.setLevel(getattr(logging, cfg.get("log_level", "INFO"), logging.INFO))
             # Also capture root logger so 3rd-party noise (requests etc) shows up
             logging.getLogger().addHandler(handler)
+            # Don't double-emit: stop the engine's named logger from
+            # propagating to the root logger, or every record fires the
+            # handler twice (once on the named logger, once on root).
+            engine.log.propagate = False
 
-            # Dry run: monkey-patch every ClickUp write path so nothing is
-            # actually sent to ClickUp. Calls are logged instead. This covers
-            # both custom-field writes and task status changes.
-            _real_field_update = engine.update_clickup_field
+            # ── Cancellation: wrap engine writes so they abort fast ─────────
+            # Both real and dry-run paths share this wrapper, which raises a
+            # sentinel exception that bubbles up out of run_sync() so the
+            # matching loop can exit between tasks.
+            cancel_event = self._cancel_event
+
+            class _Cancelled(Exception):
+                pass
+
+            _real_field_update  = engine.update_clickup_field
             _real_status_update = engine.update_clickup_status
+            _real_delivery_update = engine.update_clickup_ad_delivery
+
+            def _check_cancel():
+                if cancel_event.is_set():
+                    raise _Cancelled()
+
             if dry_run:
-                def _fake_field_update(task_id, field_id, value, task_name, field_name):
+                def _fake_field_update(task_id, field_id, value, task_name, field_name, value_options=None):
+                    _check_cancel()
                     engine.log.info(
                         f"[DRY-RUN] would write '{field_name}' = {value} "
                         f"→ task '{task_name}' ({task_id})"
                     )
                     return True
                 def _fake_status_update(task_id, status, task_name):
+                    _check_cancel()
                     engine.log.info(
                         f"[DRY-RUN] would change status → '{status}' on '{task_name}' ({task_id})"
                     )
                     return True
-                engine.update_clickup_field = _fake_field_update
-                engine.update_clickup_status = _fake_status_update
+                def _fake_delivery_update(task_id, delivery_key, task_name):
+                    _check_cancel()
+                    engine.log.info(
+                        f"[DRY-RUN] would set Ad delivery → '{delivery_key}' on '{task_name}' ({task_id})"
+                    )
+                    return True
+                engine.update_clickup_field       = _fake_field_update
+                engine.update_clickup_status      = _fake_status_update
+                engine.update_clickup_ad_delivery = _fake_delivery_update
+            else:
+                # Real run: still wrap to insert cancel checks before each write.
+                def _wrapped_field_update(task_id, field_id, value, task_name, field_name, value_options=None):
+                    _check_cancel()
+                    return _real_field_update(task_id, field_id, value, task_name, field_name, value_options=value_options)
+                def _wrapped_status_update(task_id, status, task_name):
+                    _check_cancel()
+                    return _real_status_update(task_id, status, task_name)
+                def _wrapped_delivery_update(task_id, delivery_key, task_name):
+                    _check_cancel()
+                    return _real_delivery_update(task_id, delivery_key, task_name)
+                engine.update_clickup_field       = _wrapped_field_update
+                engine.update_clickup_status      = _wrapped_status_update
+                engine.update_clickup_ad_delivery = _wrapped_delivery_update
 
             self._append(
                 f"{'Test run' if dry_run else 'Starting sync'} — date preset: {cfg.get('date_preset')}"
             )
+
+            cancelled = False
             try:
                 result = engine.run_sync()
+            except _Cancelled:
+                cancelled = True
+                result = {}
+                self._append("✖ Sync cancelled by user.")
             finally:
-                if dry_run:
-                    engine.update_clickup_field = _real_field_update
-                    engine.update_clickup_status = _real_status_update
+                engine.update_clickup_field       = _real_field_update
+                engine.update_clickup_status      = _real_status_update
+                engine.update_clickup_ad_delivery = _real_delivery_update
+
+            if cancelled:
+                with self._lock:
+                    self._status = "cancelled"
+                    self._last_result = None
+                return
             self._append(
                 f"Sync finished — synced={len(result.get('synced',[]))} "
                 f"status_changes={len(result.get('status_changed',[]))} "
@@ -697,6 +772,9 @@ class API:
     def clear_logs(self):
         RUNNER.clear_logs()
         return {"ok": True}
+
+    def cancel_sync(self):
+        return RUNNER.cancel()
 
     # --- scheduler (GitHub Actions) ------------------------------------- #
     def github_start_device_flow(self):

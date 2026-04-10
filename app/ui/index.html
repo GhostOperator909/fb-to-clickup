@@ -353,6 +353,7 @@
         <div class="btn-row" style="margin-top:0">
           <button class="btn" id="run-sync-btn">Run Sync Now</button>
           <button class="btn ghost" id="test-sync-btn">Test Run (no writes)</button>
+          <button class="btn danger hidden" id="cancel-sync-btn">Cancel</button>
           <button class="btn ghost" id="clear-logs-btn">Clear logs</button>
           <div style="flex:1"></div>
           <span id="run-status-pill" class="pill dim">idle</span>
@@ -779,6 +780,7 @@ let runPollInterval = null;
 async function startSyncRun(dryRun) {
   const runBtn = document.getElementById('run-sync-btn');
   const testBtn = document.getElementById('test-sync-btn');
+  const cancelBtn = document.getElementById('cancel-sync-btn');
   const log = document.getElementById('run-log');
   const pill = document.getElementById('run-status-pill');
   const elapsed = document.getElementById('run-elapsed');
@@ -786,6 +788,8 @@ async function startSyncRun(dryRun) {
 
   runBtn.disabled = true;
   testBtn.disabled = true;
+  cancelBtn.classList.remove('hidden');
+  cancelBtn.disabled = false;
   log.textContent = dryRun
     ? '=== TEST RUN — no data will be written to ClickUp ===\n'
     : '';
@@ -800,13 +804,15 @@ async function startSyncRun(dryRun) {
     log.textContent += 'Error: ' + (start.error || 'failed to start');
     runBtn.disabled = false;
     testBtn.disabled = false;
+    cancelBtn.classList.add('hidden');
     pill.className = 'pill bad';
     pill.textContent = 'failed';
     return;
   }
 
   if (runPollInterval) clearInterval(runPollInterval);
-  runPollInterval = setInterval(async () => {
+  // First poll right away (don't wait 500ms for the first batch of logs)
+  const pollOnce = async () => {
     try {
       const lines = await window.pywebview.api.drain_logs();
       if (lines && lines.length) {
@@ -820,7 +826,9 @@ async function startSyncRun(dryRun) {
         runPollInterval = null;
         runBtn.disabled = false;
         testBtn.disabled = false;
-        pill.className = 'pill ' + (state.status === 'complete' ? 'good' : 'bad');
+        cancelBtn.classList.add('hidden');
+        const isCancelled = state.status === 'cancelled';
+        pill.className = 'pill ' + (state.status === 'complete' ? 'good' : (isCancelled ? 'warn' : 'bad'));
         pill.textContent = state.status + (dryRun ? ' (test)' : '');
         if (state.last_result) {
           summary.classList.remove('hidden');
@@ -835,16 +843,27 @@ async function startSyncRun(dryRun) {
               Skipped <strong>${state.last_result.skipped}</strong> ·
               Errors <strong>${state.last_result.errors}</strong>
             </div>`;
+        } else if (isCancelled) {
+          summary.classList.remove('hidden');
+          summary.innerHTML = '<div class="banner warn">Sync cancelled by user.</div>';
         }
       }
     } catch (e) {
       console.error(e);
     }
-  }, 500);
+  };
+  pollOnce();
+  runPollInterval = setInterval(pollOnce, 500);
 }
 
 document.getElementById('run-sync-btn').addEventListener('click', () => startSyncRun(false));
 document.getElementById('test-sync-btn').addEventListener('click', () => startSyncRun(true));
+document.getElementById('cancel-sync-btn').addEventListener('click', async () => {
+  const cancelBtn = document.getElementById('cancel-sync-btn');
+  cancelBtn.disabled = true;
+  await whenReady();
+  await window.pywebview.api.cancel_sync();
+});
 
 document.getElementById('clear-logs-btn').addEventListener('click', async () => {
   await whenReady();
