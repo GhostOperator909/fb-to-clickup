@@ -67,36 +67,104 @@ def app_root() -> Path:
 # Config
 # --------------------------------------------------------------------------- #
 
+import uuid
+
+# Top-level config schema (v2 — multi-account).
+#   defaults     : ClickUp settings + sync prefs that new connections inherit
+#   connections  : list of {id, name, meta_*, optional overrides, last_run_*}
+#   github_*     : OAuth + repo state (shared by all connections)
+#   schedule_*   : schedule shared by all opted-in connections
 DEFAULT_CONFIG: dict[str, Any] = {
-    # Sync credentials
-    "meta_access_token":   "",
-    "meta_ad_account_id":  "",
-    "clickup_api_key":     "",
-    "clickup_list_url":    "",
-    "date_preset":         "maximum",   # "All time"
-    "match_prefix":        "Ad",
-    "log_level":           "INFO",
-    # Scheduled sync (runs in GitHub Actions, not locally)
-    "github_token":        "",                  # OAuth token from device flow
-    "github_login":        "",                  # the user's GitHub login (for display)
-    "github_repo":         "",                  # "owner/repo" once created
+    "defaults": {
+        "clickup_api_key":  "",
+        "clickup_list_url": "",
+        "date_preset":      "maximum",
+        "match_prefix":     "Ad",
+        "log_level":        "INFO",
+    },
+    "connections": [],   # list of connection dicts
+    # GitHub-backed scheduled sync state
+    "github_token":        "",
+    "github_login":        "",
+    "github_repo":         "",
     "schedule_enabled":    False,
-    "schedule_frequency":  "daily",             # hourly | six_hourly | daily | weekly
-    "schedule_time":       "09:00",             # HH:MM in the configured timezone
-    "schedule_weekday":    1,                   # 1=Mon … 7=Sun, used by weekly
-    "timezone":            "America/New_York",  # IANA tz name; default ET
+    "schedule_frequency":  "daily",
+    "schedule_time":       "09:00",
+    "schedule_weekday":    1,
+    "timezone":            "America/New_York",
     "setup_complete":      False,
 }
+
+DEFAULT_CONNECTION: dict[str, Any] = {
+    "id":                  "",
+    "name":                "",
+    "meta_access_token":   "",
+    "meta_ad_account_id":  "",
+    # Per-connection overrides (empty string = inherit from defaults)
+    "clickup_api_key":     "",
+    "clickup_list_url":    "",
+    "date_preset":         "",
+    "match_prefix":        "",
+    "log_level":           "",
+    # Scheduling opt-in
+    "scheduled":           False,
+    # Last run state, populated by the runner
+    "last_run_at":         "",
+    "last_run_status":     "",     # complete | failed | cancelled
+    "last_run_summary":    None,   # {synced, status_changed, skipped, errors}
+}
+
+def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Migrate the original flat config (single Meta token, single ClickUp list)
+    into the new {defaults, connections} schema. Idempotent — safe to call
+    repeatedly. Existing v2 configs pass through untouched.
+    """
+    if "connections" in data and isinstance(data["connections"], list):
+        # Already v2, just fill in any missing defaults
+        out = {**DEFAULT_CONFIG, **data}
+        out["defaults"] = {**DEFAULT_CONFIG["defaults"], **out.get("defaults", {})}
+        # Make sure each connection has every field
+        out["connections"] = [
+            {**DEFAULT_CONNECTION, **c} for c in out["connections"]
+        ]
+        return out
+
+    # v1 → v2 migration
+    out = {**DEFAULT_CONFIG}
+    out["defaults"] = {
+        "clickup_api_key":  data.get("clickup_api_key", "") or "",
+        "clickup_list_url": data.get("clickup_list_url", "") or "",
+        "date_preset":      data.get("date_preset", "maximum") or "maximum",
+        "match_prefix":     data.get("match_prefix", "Ad") or "Ad",
+        "log_level":        data.get("log_level", "INFO") or "INFO",
+    }
+    out["connections"] = []
+    if data.get("meta_access_token") and data.get("meta_ad_account_id"):
+        out["connections"].append({
+            **DEFAULT_CONNECTION,
+            "id":   "default",
+            "name": "Default",
+            "meta_access_token":  data.get("meta_access_token", ""),
+            "meta_ad_account_id": data.get("meta_ad_account_id", ""),
+            "scheduled": True,
+        })
+    # Carry over GitHub + schedule state
+    for k in ("github_token", "github_login", "github_repo", "schedule_enabled",
+              "schedule_frequency", "schedule_time", "schedule_weekday",
+              "timezone", "setup_complete"):
+        if k in data:
+            out[k] = data[k]
+    return out
 
 def load_config() -> dict[str, Any]:
     if CONFIG_PATH.exists():
         try:
             data = json.loads(CONFIG_PATH.read_text())
-            merged = {**DEFAULT_CONFIG, **data}
-            return merged
+            return _migrate_v1_to_v2(data)
         except (json.JSONDecodeError, OSError):
             pass
-    return dict(DEFAULT_CONFIG)
+    return {**DEFAULT_CONFIG, "defaults": dict(DEFAULT_CONFIG["defaults"])}
 
 def save_config(cfg: dict[str, Any]) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
@@ -105,8 +173,87 @@ def save_config(cfg: dict[str, Any]) -> None:
     except OSError:
         pass
 
+# --------------------------------------------------------------------------- #
+# Connection helpers
+# --------------------------------------------------------------------------- #
+
+def get_effective_config(cfg: dict[str, Any], connection_id: str) -> dict[str, Any]:
+    """
+    Build the flat config dict the sync engine expects, by merging the global
+    defaults with a specific connection's overrides. Returns None if not found.
+    """
+    conn = next((c for c in cfg.get("connections", []) if c.get("id") == connection_id), None)
+    if not conn:
+        return None
+    defaults = cfg.get("defaults", {})
+    def pick(key: str) -> str:
+        v = conn.get(key) or ""
+        return v if v else defaults.get(key, "")
+    return {
+        "meta_access_token":  conn.get("meta_access_token", ""),
+        "meta_ad_account_id": conn.get("meta_ad_account_id", ""),
+        "clickup_api_key":    pick("clickup_api_key"),
+        "clickup_list_url":   pick("clickup_list_url"),
+        "date_preset":        pick("date_preset") or "maximum",
+        "match_prefix":       pick("match_prefix") or "Ad",
+        "log_level":          pick("log_level") or "INFO",
+    }
+
+def list_connections(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a UI-safe summary of every connection (no secrets)."""
+    out = []
+    for c in cfg.get("connections", []):
+        out.append({
+            "id":               c.get("id", ""),
+            "name":             c.get("name", ""),
+            "meta_ad_account_id": c.get("meta_ad_account_id", ""),
+            "meta_access_token_set": bool(c.get("meta_access_token")),
+            "clickup_list_url": c.get("clickup_list_url", "") or cfg.get("defaults", {}).get("clickup_list_url", ""),
+            "uses_default_clickup": not bool(c.get("clickup_list_url")),
+            "scheduled":        bool(c.get("scheduled", False)),
+            "last_run_at":      c.get("last_run_at", ""),
+            "last_run_status":  c.get("last_run_status", ""),
+            "last_run_summary": c.get("last_run_summary"),
+        })
+    return out
+
+def find_connection(cfg: dict[str, Any], connection_id: str) -> dict[str, Any] | None:
+    return next((c for c in cfg.get("connections", []) if c.get("id") == connection_id), None)
+
+def upsert_connection(cfg: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Create or update a connection. Returns the connection id."""
+    cid = (payload.get("id") or "").strip() or uuid.uuid4().hex[:8]
+    existing = find_connection(cfg, cid)
+    if existing:
+        # Don't blank out a saved Meta token if the UI sent an empty string
+        for key in ("meta_access_token",):
+            if not payload.get(key):
+                payload[key] = existing.get(key, "")
+        existing.update({k: v for k, v in payload.items() if k in DEFAULT_CONNECTION})
+        existing["id"] = cid
+    else:
+        new_conn = {**DEFAULT_CONNECTION}
+        new_conn.update({k: v for k, v in payload.items() if k in DEFAULT_CONNECTION})
+        new_conn["id"] = cid
+        cfg.setdefault("connections", []).append(new_conn)
+    return cid
+
+def delete_connection_by_id(cfg: dict[str, Any], connection_id: str) -> bool:
+    before = len(cfg.get("connections", []))
+    cfg["connections"] = [c for c in cfg.get("connections", []) if c.get("id") != connection_id]
+    return len(cfg["connections"]) < before
+
+def update_connection_run_state(cfg: dict[str, Any], connection_id: str,
+                                 status: str, summary: dict | None) -> None:
+    conn = find_connection(cfg, connection_id)
+    if not conn:
+        return
+    conn["last_run_at"]      = datetime.utcnow().isoformat() + "Z"
+    conn["last_run_status"]  = status
+    conn["last_run_summary"] = summary
+
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
-    """Push config values into os.environ for the sync_engine module to read."""
+    """Push effective config values into os.environ for the sync engine."""
     os.environ["META_ACCESS_TOKEN"]   = cfg.get("meta_access_token", "") or ""
     os.environ["META_AD_ACCOUNT_ID"]  = cfg.get("meta_ad_account_id", "") or ""
     os.environ["CLICKUP_API_KEY"]     = cfg.get("clickup_api_key", "") or ""
@@ -154,6 +301,9 @@ class SyncRunner:
         self._last_error: str | None = None
         self._thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
+        # Which connection is currently running. Set in start(), cleared on idle.
+        self._connection_id: str = ""
+        self._connection_name: str = ""
 
     # -- public (called from API class) ------------------------------------- #
 
@@ -171,6 +321,8 @@ class SyncRunner:
                 "last_error":  self._last_error,
                 "log_count":   len(self._log_lines),
                 "cancel_requested": self._cancel_event.is_set(),
+                "connection_id":   self._connection_id,
+                "connection_name": self._connection_name,
             }
 
     def drain_logs(self) -> list[str]:
@@ -196,7 +348,8 @@ class SyncRunner:
             self._last_result = None
             self._last_error = None
 
-    def start(self, cfg: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
+    def start(self, cfg: dict[str, Any], dry_run: bool = False,
+              connection_id: str = "", connection_name: str = "") -> dict[str, Any]:
         with self._lock:
             if self._running:
                 return {"ok": False, "error": "A sync is already running"}
@@ -209,10 +362,13 @@ class SyncRunner:
             self._last_result = None
             self._last_error = None
             self._cancel_event.clear()
+            self._connection_id = connection_id
+            self._connection_name = connection_name
         # Give the UI an immediate heartbeat so the log pane never looks frozen.
+        label = f" [{connection_name}]" if connection_name else ""
         self._append(
-            "TEST RUN — no writes will be sent to ClickUp"
-            if dry_run else "Sync requested — starting worker thread"
+            f"TEST RUN{label} — no writes will be sent to ClickUp"
+            if dry_run else f"Sync requested{label} — starting worker thread"
         )
         self._thread = threading.Thread(target=self._run, args=(cfg, dry_run), daemon=True)
         self._thread.start()
@@ -336,6 +492,8 @@ class SyncRunner:
                 with self._lock:
                     self._status = "cancelled"
                     self._last_result = None
+                if not dry_run and self._connection_id:
+                    self._persist_run("cancelled", None)
                 return
             self._append(
                 f"Sync finished — synced={len(result.get('synced',[]))} "
@@ -351,6 +509,10 @@ class SyncRunner:
                     "errors":         len(result.get("errors", [])),
                 }
                 self._status = "failed" if self._last_result["errors"] else "complete"
+            # Persist last-run state to the connection (real runs only — dry runs
+            # don't touch ClickUp so they shouldn't overwrite the real history).
+            if not dry_run and self._connection_id:
+                self._persist_run(self._status, self._last_result)
         except Exception as e:
             tb = traceback.format_exc()
             self._append(f"FATAL: {e}")
@@ -359,10 +521,22 @@ class SyncRunner:
             with self._lock:
                 self._status = "failed"
                 self._last_error = str(e)
+            if not dry_run and self._connection_id:
+                self._persist_run("failed", None)
         finally:
             with self._lock:
                 self._running = False
                 self._finished_at = time.time()
+
+    def _persist_run(self, status: str, summary: dict | None) -> None:
+        """Update the connection's last_run_* fields on disk."""
+        try:
+            cfg = load_config()
+            update_connection_run_state(cfg, self._connection_id, status, summary)
+            save_config(cfg)
+        except Exception as e:
+            # Don't crash the runner if persistence fails — just log it.
+            self._append(f"⚠ Could not persist run state: {e}")
 
 RUNNER = SyncRunner()
 
@@ -685,26 +859,41 @@ def test_clickup(api_key: str, list_url: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 class API:
-    # --- config --------------------------------------------------------- #
-    def get_config(self):
+    # --- defaults + global config --------------------------------------- #
+    def get_defaults(self):
         cfg = load_config()
-        # Mask secrets when returning to the UI (UI treats empty as "unchanged")
+        d = cfg.get("defaults", {})
         return {
-            **cfg,
-            "meta_access_token_set": bool(cfg.get("meta_access_token")),
-            "clickup_api_key_set":   bool(cfg.get("clickup_api_key")),
+            "clickup_api_key":  "",  # never echo secrets
+            "clickup_api_key_set": bool(d.get("clickup_api_key")),
+            "clickup_list_url": d.get("clickup_list_url", ""),
+            "date_preset":      d.get("date_preset", "maximum"),
+            "match_prefix":     d.get("match_prefix", "Ad"),
+            "log_level":        d.get("log_level", "INFO"),
         }
 
-    def save_config(self, payload: dict):
-        current = load_config()
-        # Only overwrite secrets if a new non-empty value was sent
+    def save_defaults(self, payload: dict):
+        cfg = load_config()
+        d = cfg.setdefault("defaults", {})
         for key, value in (payload or {}).items():
-            if key in ("meta_access_token", "clickup_api_key") and not value:
-                continue
-            if key in DEFAULT_CONFIG:
-                current[key] = value
-        current["setup_complete"] = True
-        save_config(current)
+            if key == "clickup_api_key" and not value:
+                continue  # don't blank out secret
+            if key in DEFAULT_CONFIG["defaults"]:
+                d[key] = value
+        save_config(cfg)
+        return {"ok": True}
+
+    def get_setup_state(self):
+        cfg = load_config()
+        return {
+            "setup_complete": bool(cfg.get("setup_complete")),
+            "connection_count": len(cfg.get("connections", [])),
+        }
+
+    def mark_setup_complete(self):
+        cfg = load_config()
+        cfg["setup_complete"] = True
+        save_config(cfg)
         return {"ok": True}
 
     def get_app_info(self):
@@ -717,21 +906,67 @@ class API:
             "log_dir":        str(LOG_DIR),
         }
 
-    # --- credential tests ---------------------------------------------- #
+    # --- connections ---------------------------------------------------- #
+    def list_connections(self):
+        cfg = load_config()
+        return list_connections(cfg)
+
+    def get_connection(self, connection_id: str):
+        cfg = load_config()
+        conn = find_connection(cfg, connection_id)
+        if not conn:
+            return None
+        # Mask secrets
+        return {
+            **conn,
+            "meta_access_token": "",
+            "meta_access_token_set": bool(conn.get("meta_access_token")),
+            "clickup_api_key": "",
+            "clickup_api_key_set": bool(conn.get("clickup_api_key")),
+        }
+
+    def save_connection(self, payload: dict):
+        cfg = load_config()
+        cid = upsert_connection(cfg, payload or {})
+        # First connection saved completes setup
+        if cfg.get("connections"):
+            cfg["setup_complete"] = True
+        save_config(cfg)
+        return {"ok": True, "id": cid}
+
+    def delete_connection(self, connection_id: str):
+        cfg = load_config()
+        ok = delete_connection_by_id(cfg, connection_id)
+        save_config(cfg)
+        return {"ok": ok}
+
+    def set_connection_scheduled(self, connection_id: str, scheduled: bool):
+        cfg = load_config()
+        conn = find_connection(cfg, connection_id)
+        if not conn:
+            return {"ok": False, "error": "Connection not found"}
+        conn["scheduled"] = bool(scheduled)
+        save_config(cfg)
+        return {"ok": True}
+
+    # --- credential tests (unchanged — caller passes raw token + URL) ---- #
     def test_meta(self, token: str, account_id: str):
         return test_meta(token, account_id)
 
     def test_clickup(self, api_key: str, list_url: str):
         return test_clickup(api_key, list_url)
 
-    def verify_setup(self):
-        """Run the full end-to-end readiness check using the saved config."""
+    def verify_connection(self, connection_id: str):
+        """Live end-to-end readiness check for one connection."""
         cfg = load_config()
-        report = verify_setup(cfg)
+        eff = get_effective_config(cfg, connection_id)
+        if not eff:
+            return {"ok": False, "error": "Connection not found", "steps": []}
+        report = verify_setup(eff)
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            (LOG_DIR / f"verify_{stamp}.json").write_text(
+            (LOG_DIR / f"verify_{connection_id}_{stamp}.json").write_text(
                 json.dumps(report, indent=2, default=str)
             )
         except Exception:
@@ -756,12 +991,21 @@ class API:
         ]
 
     # --- sync runner ---------------------------------------------------- #
-    def run_sync(self, dry_run: bool = False):
+    def run_sync(self, connection_id: str, dry_run: bool = False):
         cfg = load_config()
-        missing = [k for k in ("meta_access_token", "meta_ad_account_id", "clickup_api_key", "clickup_list_url") if not cfg.get(k)]
+        eff = get_effective_config(cfg, connection_id)
+        if not eff:
+            return {"ok": False, "error": "Connection not found"}
+        missing = [k for k in ("meta_access_token", "meta_ad_account_id", "clickup_api_key", "clickup_list_url") if not eff.get(k)]
         if missing:
-            return {"ok": False, "error": f"Missing config: {', '.join(missing)}"}
-        return RUNNER.start(cfg, dry_run=bool(dry_run))
+            return {"ok": False, "error": f"Missing config for this connection: {', '.join(missing)}"}
+        conn = find_connection(cfg, connection_id) or {}
+        return RUNNER.start(
+            eff,
+            dry_run=bool(dry_run),
+            connection_id=connection_id,
+            connection_name=conn.get("name", connection_id),
+        )
 
     def get_run_state(self):
         return RUNNER.state()
