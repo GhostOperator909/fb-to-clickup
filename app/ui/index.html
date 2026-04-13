@@ -191,6 +191,16 @@
   }
   footer a { color: var(--fg-dim); }
 
+  /* Password show/hide toggle */
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 42px; width: 100%; }
+  .pw-toggle {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    background: transparent; border: 0; color: var(--fg-dim); cursor: pointer;
+    font-size: 13px; padding: 4px 6px; line-height: 1;
+  }
+  .pw-toggle:hover { color: var(--fg); }
+
   /* Utility */
   .hidden { display: none !important; }
   .spin { animation: spin 1s linear infinite; display: inline-block; }
@@ -243,7 +253,7 @@
 
           <div class="field">
             <label>Meta access token</label>
-            <input id="meta_access_token" type="password" placeholder="EAAx..." autocomplete="off" />
+            <div class="pw-wrap"><input id="meta_access_token" type="password" placeholder="EAAx..." autocomplete="off" /><button type="button" class="pw-toggle" data-target="meta_access_token">show</button></div>
             <div class="hint">You can generate this in Meta Business Suite → Business Settings → System Users.</div>
           </div>
 
@@ -268,7 +278,7 @@
 
           <div class="field">
             <label>ClickUp API key</label>
-            <input id="clickup_api_key" type="password" placeholder="pk_..." autocomplete="off" />
+            <div class="pw-wrap"><input id="clickup_api_key" type="password" placeholder="pk_..." autocomplete="off" /><button type="button" class="pw-toggle" data-target="clickup_api_key">show</button></div>
             <div class="hint">Generate at <a href="https://app.clickup.com" target="_blank">app.clickup.com</a> → Settings → Apps → API Token.</div>
           </div>
 
@@ -390,7 +400,7 @@
         <h2 style="margin:18px 0 10px">Meta credentials</h2>
         <div class="field">
           <label>Meta access token</label>
-          <input id="conn-meta-token" type="password" placeholder="EAA..." autocomplete="off">
+          <div class="pw-wrap"><input id="conn-meta-token" type="password" placeholder="EAA..." autocomplete="off"><button type="button" class="pw-toggle" data-target="conn-meta-token">show</button></div>
           <div class="hint">System user token with the <code>ads_read</code> scope. Leave blank when editing to keep the existing one.</div>
         </div>
 
@@ -414,7 +424,7 @@
         <h2 style="margin:18px 0 10px">ClickUp (overrides — leave blank to use Defaults)</h2>
         <div class="field">
           <label>ClickUp API key</label>
-          <input id="conn-clickup-key" type="password" placeholder="Inherits from Defaults" autocomplete="off">
+          <div class="pw-wrap"><input id="conn-clickup-key" type="password" placeholder="Inherits from Defaults" autocomplete="off"><button type="button" class="pw-toggle" data-target="conn-clickup-key">show</button></div>
         </div>
 
         <div class="field" id="conn-clickup-list-picker-wrap" style="display:none">
@@ -525,11 +535,13 @@
       <!-- Device flow in progress -->
       <div id="gh-device-flow" class="card hidden">
         <h2>Authorize Ad Sync on GitHub</h2>
-        <p>In the browser we just opened, paste this code and click <strong>Authorize</strong>:</p>
+        <p>Go to <strong id="gh-verify-url" style="-webkit-user-select:text; user-select:text; cursor:text">https://github.com/login/device</strong> and enter this code:</p>
         <div class="device-code" id="device-code-display">----</div>
         <p class="sub">Waiting for authorization… <span id="device-spinner" class="spin">⏳</span></p>
         <div class="btn-row">
+          <button class="btn" id="gh-open-url">Open in browser</button>
           <button class="btn ghost" id="gh-copy-code">Copy code</button>
+          <button class="btn ghost" id="gh-copy-url">Copy URL</button>
           <button class="btn ghost" id="gh-cancel-flow">Cancel</button>
         </div>
       </div>
@@ -607,7 +619,7 @@
         <h2>ClickUp (default)</h2>
         <div class="field">
           <label>API key</label>
-          <input id="s_clickup_api_key" type="password" placeholder="Leave blank to keep existing" autocomplete="off" />
+          <div class="pw-wrap"><input id="s_clickup_api_key" type="password" placeholder="Leave blank to keep existing" autocomplete="off" /><button type="button" class="pw-toggle" data-target="s_clickup_api_key">show</button></div>
           <div class="hint">Used by every connection that doesn't override its own ClickUp credentials.</div>
         </div>
         <div class="field">
@@ -1144,8 +1156,10 @@ document.getElementById('gh-connect-btn').addEventListener('click', async () => 
   document.getElementById('gh-disconnected').classList.add('hidden');
   document.getElementById('gh-device-flow').classList.remove('hidden');
   document.getElementById('device-code-display').textContent = r.user_code;
-  // Open browser to verification URI
-  window.open(r.verification_uri, '_blank');
+  document.getElementById('gh-verify-url').textContent = r.verification_uri;
+  document.getElementById('gh-verify-url').dataset.url = r.verification_uri;
+  // Open browser via Python (pywebview blocks window.open)
+  await window.pywebview.api.open_url(r.verification_uri);
   // Start polling
   if (devicePoll) clearTimeout(devicePoll);
   const poll = async () => {
@@ -1167,9 +1181,27 @@ document.getElementById('gh-cancel-flow').addEventListener('click', () => {
   document.getElementById('gh-disconnected').classList.remove('hidden');
 });
 
+document.getElementById('gh-open-url').addEventListener('click', async () => {
+  const url = document.getElementById('gh-verify-url').dataset.url || 'https://github.com/login/device';
+  await window.pywebview.api.open_url(url);
+});
+
 document.getElementById('gh-copy-code').addEventListener('click', () => {
   const code = document.getElementById('device-code-display').textContent;
   navigator.clipboard?.writeText(code);
+  const btn = document.getElementById('gh-copy-code');
+  const orig = btn.textContent;
+  btn.textContent = 'Copied ✓';
+  setTimeout(() => { btn.textContent = orig; }, 1500);
+});
+
+document.getElementById('gh-copy-url').addEventListener('click', () => {
+  const url = document.getElementById('gh-verify-url').dataset.url || 'https://github.com/login/device';
+  navigator.clipboard?.writeText(url);
+  const btn = document.getElementById('gh-copy-url');
+  const orig = btn.textContent;
+  btn.textContent = 'Copied ✓';
+  setTimeout(() => { btn.textContent = orig; }, 1500);
 });
 
 document.getElementById('gh-disconnect-btn').addEventListener('click', async () => {
@@ -1593,6 +1625,21 @@ document.getElementById('run-back-btn').addEventListener('click', () => {
 // =============================================================== //
 // Helpers
 // =============================================================== //
+
+// Show/hide password toggles
+document.querySelectorAll('.pw-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const input = document.getElementById(btn.dataset.target);
+    if (!input) return;
+    if (input.type === 'password') {
+      input.type = 'text';
+      btn.textContent = 'hide';
+    } else {
+      input.type = 'password';
+      btn.textContent = 'show';
+    }
+  });
+});
 
 function escapeHtml(s) {
   if (s == null) return '';

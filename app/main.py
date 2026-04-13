@@ -222,11 +222,19 @@ def find_connection(cfg: dict[str, Any], connection_id: str) -> dict[str, Any] |
 
 def upsert_connection(cfg: dict[str, Any], payload: dict[str, Any]) -> str:
     """Create or update a connection. Returns the connection id."""
+    # Clean tokens/keys BEFORE saving — strip invisible control chars from paste
+    for key in ("meta_access_token", "clickup_api_key"):
+        if payload.get(key):
+            payload[key] = _clean_token(payload[key])
+    for key in ("meta_ad_account_id",):
+        if payload.get(key):
+            payload[key] = _clean_token(payload[key].replace("act_", ""))
+
     cid = (payload.get("id") or "").strip() or uuid.uuid4().hex[:8]
     existing = find_connection(cfg, cid)
     if existing:
-        # Don't blank out a saved Meta token if the UI sent an empty string
-        for key in ("meta_access_token",):
+        # Don't blank out a saved token/key if the UI sent an empty string
+        for key in ("meta_access_token", "clickup_api_key"):
             if not payload.get(key):
                 payload[key] = existing.get(key, "")
         existing.update({k: v for k, v in payload.items() if k in DEFAULT_CONNECTION})
@@ -254,10 +262,10 @@ def update_connection_run_state(cfg: dict[str, Any], connection_id: str,
 
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
     """Push effective config values into os.environ for the sync engine."""
-    os.environ["META_ACCESS_TOKEN"]   = cfg.get("meta_access_token", "") or ""
-    os.environ["META_AD_ACCOUNT_ID"]  = cfg.get("meta_ad_account_id", "") or ""
-    os.environ["CLICKUP_API_KEY"]     = cfg.get("clickup_api_key", "") or ""
-    os.environ["CLICKUP_LIST_URL"]    = cfg.get("clickup_list_url", "") or ""
+    os.environ["META_ACCESS_TOKEN"]   = _clean_token(cfg.get("meta_access_token", ""))
+    os.environ["META_AD_ACCOUNT_ID"]  = _clean_token(cfg.get("meta_ad_account_id", ""))
+    os.environ["CLICKUP_API_KEY"]     = _clean_token(cfg.get("clickup_api_key", ""))
+    os.environ["CLICKUP_LIST_URL"]    = (cfg.get("clickup_list_url", "") or "").strip()
     os.environ["DATE_PRESET"]         = cfg.get("date_preset", "maximum") or "maximum"
     os.environ["MATCH_PREFIX"]        = cfg.get("match_prefix", "Ad") or "Ad"
     os.environ["LOG_LEVEL"]           = cfg.get("log_level", "INFO") or "INFO"
@@ -571,7 +579,8 @@ def _sync_engine_files() -> dict[str, bytes]:
 
 def test_meta(token: str, account_id: str) -> dict[str, Any]:
     import urllib.request, urllib.error
-    account_id = (account_id or "").replace("act_", "").strip()
+    token = _clean_token(token)
+    account_id = _clean_token((account_id or "").replace("act_", ""))
     if not token or not account_id:
         return {"ok": False, "error": "Missing token or ad account ID"}
     url = (
@@ -822,12 +831,20 @@ def verify_setup(cfg: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _clean_token(s: str) -> str:
+    """Strip whitespace, newlines, carriage returns, and other invisible chars
+    that sneak in from copy-paste.  Without this, urllib raises
+    'URL can't contain control characters'."""
+    import re as _re
+    return _re.sub(r'[\x00-\x1f\x7f\s]+', '', s or '')
+
 def list_meta_ad_accounts(token: str) -> dict[str, Any]:
     """
     Return every ad account the given Meta access token can see.
     Uses /me/adaccounts which works for both user tokens and system user tokens.
     """
     import urllib.request, urllib.error
+    token = _clean_token(token)
     if not token:
         return {"ok": False, "error": "Missing Meta access token"}
     accounts = []
@@ -868,6 +885,7 @@ def list_clickup_lists(api_key: str) -> dict[str, Any]:
     'Brello — E-commerce > Creative Process > Creative Process List'.
     """
     import urllib.request, urllib.error
+    api_key = _clean_token(api_key)
     if not api_key:
         return {"ok": False, "error": "Missing ClickUp API key"}
 
@@ -927,6 +945,8 @@ def list_clickup_lists(api_key: str) -> dict[str, Any]:
 
 def test_clickup(api_key: str, list_url: str) -> dict[str, Any]:
     import urllib.request, urllib.error
+    api_key = _clean_token(api_key)
+    list_url = (list_url or "").strip()
     if not api_key or not list_url:
         return {"ok": False, "error": "Missing API key or list URL"}
     m = re.search(r'6-(\d+)-', list_url)
@@ -988,9 +1008,16 @@ class API:
 
     def get_setup_state(self):
         cfg = load_config()
+        conn_count = len(cfg.get("connections", []))
+        # If setup_complete is True but there are no connections, something
+        # went wrong (e.g. v1→v2 migration with empty credentials).  Reset
+        # so the wizard shows again.
+        if cfg.get("setup_complete") and conn_count == 0:
+            cfg["setup_complete"] = False
+            save_config(cfg)
         return {
             "setup_complete": bool(cfg.get("setup_complete")),
-            "connection_count": len(cfg.get("connections", [])),
+            "connection_count": conn_count,
         }
 
     def mark_setup_complete(self):
@@ -1274,6 +1301,15 @@ class API:
             return {"ok": False, "error": "GitHub is not connected"}
         from github_client import trigger_workflow
         return trigger_workflow(cfg)
+
+    def open_url(self, url: str):
+        """Open a URL in the user's default browser. Used by the GitHub
+        Device Flow since pywebview's window.open() is blocked."""
+        try:
+            subprocess.Popen(["open", url])
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def open_log_dir(self):
         try:
