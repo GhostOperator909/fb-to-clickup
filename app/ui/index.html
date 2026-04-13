@@ -658,6 +658,7 @@
           <button class="btn" id="settings-save-btn">Save defaults</button>
           <div style="flex:1"></div>
           <button class="btn ghost" id="open-logs-btn">Open log folder</button>
+          <button class="btn danger" id="factory-reset-btn">Factory Reset</button>
         </div>
         <div id="settings-save-msg" class="banner info hidden" style="margin-top:14px"></div>
       </div>
@@ -1325,6 +1326,19 @@ document.getElementById('settings-save-btn').addEventListener('click', async () 
 document.getElementById('open-logs-btn').addEventListener('click', async () => {
   await whenReady();
   await window.pywebview.api.open_log_dir();
+});
+
+document.getElementById('factory-reset-btn').addEventListener('click', async () => {
+  if (!confirm('This will delete ALL saved connections, credentials, and logs. The app will restart with the setup wizard.\n\nAre you sure?')) return;
+  await whenReady();
+  const r = await window.pywebview.api.factory_reset();
+  if (r.ok) {
+    document.getElementById('nav').classList.add('hidden');
+    showView('setup');
+    goToStep(1);
+  } else {
+    alert('Reset failed: ' + (r.error || 'unknown'));
+  }
 });
 
 // =============================================================== //

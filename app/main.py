@@ -1008,16 +1008,20 @@ class API:
 
     def get_setup_state(self):
         cfg = load_config()
-        conn_count = len(cfg.get("connections", []))
-        # If setup_complete is True but there are no connections, something
-        # went wrong (e.g. v1→v2 migration with empty credentials).  Reset
-        # so the wizard shows again.
-        if cfg.get("setup_complete") and conn_count == 0:
+        # Count only connections that have an actual Meta token saved.
+        # Empty/placeholder connections from a stale config or a previous
+        # install should NOT count — the wizard needs to show so the user
+        # can enter real credentials.
+        usable = [
+            c for c in cfg.get("connections", [])
+            if c.get("meta_access_token") and c.get("meta_ad_account_id")
+        ]
+        if not usable:
             cfg["setup_complete"] = False
             save_config(cfg)
         return {
             "setup_complete": bool(cfg.get("setup_complete")),
-            "connection_count": conn_count,
+            "connection_count": len(usable),
         }
 
     def mark_setup_complete(self):
@@ -1307,6 +1311,19 @@ class API:
         Device Flow since pywebview's window.open() is blocked."""
         try:
             subprocess.Popen(["open", url])
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def factory_reset(self):
+        """Wipe the config file and all logs. Next launch shows the wizard."""
+        try:
+            if CONFIG_PATH.exists():
+                CONFIG_PATH.unlink()
+            import shutil
+            if LOG_DIR.exists():
+                shutil.rmtree(LOG_DIR, ignore_errors=True)
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
