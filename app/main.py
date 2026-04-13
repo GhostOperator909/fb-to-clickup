@@ -67,6 +67,7 @@ def app_root() -> Path:
 # Config
 # --------------------------------------------------------------------------- #
 
+import plistlib
 import uuid
 
 # Top-level config schema (v2 — multi-account).
@@ -547,6 +548,142 @@ class SyncRunner:
             self._append(f"⚠ Could not persist run state: {e}")
 
 RUNNER = SyncRunner()
+
+# --------------------------------------------------------------------------- #
+# Local scheduler (macOS LaunchAgent via launchd)
+# --------------------------------------------------------------------------- #
+
+LAUNCHD_DIR   = Path.home() / "Library" / "LaunchAgents"
+LAUNCHD_PLIST = LAUNCHD_DIR / f"{APP_LABEL}.plist"
+
+def _build_plist(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Build a launchd plist that runs the app in headless sync mode."""
+    # In a PyInstaller bundle, the executable IS the app binary
+    if getattr(sys, "frozen", False):
+        program = [sys.executable, "--headless-sync"]
+    else:
+        program = [sys.executable, str(Path(__file__).resolve()), "--headless-sync"]
+
+    plist: dict[str, Any] = {
+        "Label":              APP_LABEL,
+        "ProgramArguments":   program,
+        "RunAtLoad":          False,
+        "StandardOutPath":    str(LOG_DIR / "launchd_stdout.log"),
+        "StandardErrorPath":  str(LOG_DIR / "launchd_stderr.log"),
+    }
+
+    freq = cfg.get("local_schedule_frequency", "daily")
+    hhmm = cfg.get("local_schedule_time", "09:00")
+    try:
+        hour, minute = (int(x) for x in hhmm.split(":"))
+    except (ValueError, AttributeError):
+        hour, minute = 9, 0
+
+    if freq == "hourly":
+        plist["StartInterval"] = 3600
+    elif freq == "six_hourly":
+        plist["StartInterval"] = 6 * 3600
+    elif freq == "weekly":
+        weekday = int(cfg.get("local_schedule_weekday", 1))
+        plist["StartCalendarInterval"] = {"Hour": hour, "Minute": minute, "Weekday": weekday % 7}
+    else:  # daily
+        plist["StartCalendarInterval"] = {"Hour": hour, "Minute": minute}
+
+    return plist
+
+def install_local_schedule(cfg: dict[str, Any]) -> dict[str, Any]:
+    try:
+        LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
+        uninstall_local_schedule(silent=True)
+        plist = _build_plist(cfg)
+        LAUNCHD_PLIST.write_bytes(plistlib.dumps(plist))
+        uid = os.getuid()
+        r = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(LAUNCHD_PLIST)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            r = subprocess.run(
+                ["launchctl", "load", "-w", str(LAUNCHD_PLIST)],
+                capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                return {"ok": False, "error": f"launchctl load failed: {r.stderr.strip() or r.stdout.strip()}"}
+        return {"ok": True, "plist": str(LAUNCHD_PLIST)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def uninstall_local_schedule(silent: bool = False) -> dict[str, Any]:
+    try:
+        uid = os.getuid()
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{APP_LABEL}"], capture_output=True, text=True)
+        subprocess.run(["launchctl", "unload", str(LAUNCHD_PLIST)], capture_output=True, text=True)
+        if LAUNCHD_PLIST.exists():
+            LAUNCHD_PLIST.unlink()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def local_schedule_status() -> dict[str, Any]:
+    installed = LAUNCHD_PLIST.exists()
+    active = False
+    if installed:
+        uid = os.getuid()
+        r = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{APP_LABEL}"],
+            capture_output=True, text=True,
+        )
+        active = r.returncode == 0
+    return {"installed": installed, "active": active, "plist_path": str(LAUNCHD_PLIST)}
+
+def run_headless() -> int:
+    """Invoked by launchd. Runs every scheduled connection sequentially."""
+    log_path = LOG_DIR / f"scheduled_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(log_path), logging.StreamHandler(sys.stdout)],
+    )
+    hlog = logging.getLogger("adsync.headless")
+    try:
+        cfg = load_config()
+        scheduled = [c for c in cfg.get("connections", [])
+                     if c.get("scheduled") and c.get("meta_access_token") and c.get("meta_ad_account_id")]
+        if not scheduled:
+            hlog.error("No scheduled connections with credentials — skipping")
+            return 2
+        import importlib
+        for conn in scheduled:
+            hlog.info(f"=== Syncing connection: {conn.get('name', conn['id'])} ===")
+            eff = get_effective_config(cfg, conn["id"])
+            if not eff:
+                hlog.error(f"Could not build effective config for {conn['id']}")
+                continue
+            apply_config_to_env(eff)
+            root = app_root()
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            if "executions.sync_engine" in sys.modules:
+                engine = importlib.reload(sys.modules["executions.sync_engine"])
+            else:
+                engine = importlib.import_module("executions.sync_engine")
+            try:
+                result = engine.run_sync()
+                errors = len(result.get("errors", []))
+                hlog.info(f"  Done — synced={len(result.get('synced',[]))}, errors={errors}")
+                update_connection_run_state(cfg, conn["id"],
+                                            "failed" if errors else "complete",
+                                            {"synced": len(result.get("synced", [])),
+                                             "status_changed": len(result.get("status_changed", [])),
+                                             "errors": errors})
+            except Exception as e:
+                hlog.exception(f"  Fatal: {e}")
+                update_connection_run_state(cfg, conn["id"], "failed", None)
+        save_config(cfg)
+        return 0
+    except Exception as e:
+        hlog.exception(f"Headless fatal: {e}")
+        return 2
 
 # --------------------------------------------------------------------------- #
 # Source files that get uploaded to the customer's GitHub repo
@@ -1191,6 +1328,39 @@ class API:
     def cancel_sync(self):
         return RUNNER.cancel()
 
+    # --- local scheduler (launchd) -------------------------------------- #
+    def install_local_schedule(self, schedule: dict):
+        cfg = load_config()
+        for key, ui_key in [("local_schedule_frequency", "frequency"),
+                            ("local_schedule_time", "time"),
+                            ("local_schedule_weekday", "weekday")]:
+            if ui_key in (schedule or {}):
+                cfg[key] = schedule[ui_key]
+        save_config(cfg)
+        result = install_local_schedule(cfg)
+        if result.get("ok"):
+            cfg["local_schedule_enabled"] = True
+            save_config(cfg)
+        return result
+
+    def uninstall_local_schedule(self):
+        cfg = load_config()
+        result = uninstall_local_schedule()
+        cfg["local_schedule_enabled"] = False
+        save_config(cfg)
+        return result
+
+    def local_schedule_status(self):
+        cfg = load_config()
+        status = local_schedule_status()
+        return {
+            **status,
+            "enabled":   bool(cfg.get("local_schedule_enabled")),
+            "frequency": cfg.get("local_schedule_frequency", "daily"),
+            "time":      cfg.get("local_schedule_time", "09:00"),
+            "weekday":   cfg.get("local_schedule_weekday", 1),
+        }
+
     # --- scheduler (GitHub Actions) ------------------------------------- #
     def github_start_device_flow(self):
         from github_client import start_device_flow
@@ -1363,6 +1533,8 @@ def main() -> int:
     if sys.stderr is None:
         sys.stderr = io.StringIO()
 
+    if "--headless-sync" in sys.argv:
+        return run_headless()
     run_gui()
     return 0
 

@@ -517,13 +517,52 @@
     </div>
 
     <!-- ============================================================ -->
-    <!-- SCHEDULE (GitHub Actions)                                    -->
+    <!-- SCHEDULE                                                     -->
     <!-- ============================================================ -->
     <div id="view-schedule" class="view">
       <h1>Scheduled Sync</h1>
-      <p class="sub">Runs in GitHub Actions — works 24/7, no need for your computer to be on. Free for private repos.</p>
+      <p class="sub">Choose local scheduling (runs on this Mac) or GitHub Actions (runs in the cloud 24/7).</p>
 
-      <!-- Not connected state -->
+      <!-- LOCAL SCHEDULE (launchd) -->
+      <div class="card" style="margin-bottom:16px">
+        <h2>Local Schedule</h2>
+        <p class="sub">Syncs all scheduled connections on a timer. Runs in the background even when the app is closed — your Mac just needs to be on. If the Mac is asleep at the scheduled time, launchd fires the sync when it wakes up.</p>
+
+        <div class="row">
+          <div class="field">
+            <label>Frequency</label>
+            <select id="local-sched-frequency">
+              <option value="hourly">Every hour</option>
+              <option value="six_hourly">Every 6 hours</option>
+              <option value="daily" selected>Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </div>
+          <div class="field" id="local-sched-time-field">
+            <label>Time</label>
+            <input id="local-sched-time" type="time" value="09:00" />
+          </div>
+          <div class="field" id="local-sched-weekday-field" style="display:none">
+            <label>Weekday</label>
+            <select id="local-sched-weekday">
+              <option value="1">Monday</option><option value="2">Tuesday</option>
+              <option value="3">Wednesday</option><option value="4">Thursday</option>
+              <option value="5">Friday</option><option value="6">Saturday</option>
+              <option value="7">Sunday</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn" id="local-sched-enable-btn">Enable local schedule</button>
+          <button class="btn ghost hidden" id="local-sched-disable-btn">Disable</button>
+          <span id="local-sched-status" class="pill dim hidden"></span>
+        </div>
+      </div>
+
+      <div style="text-align:center; color:var(--fg-dimmer); margin:12px 0; font-size:12px">— or use cloud scheduling for 24/7 reliability —</div>
+
+      <!-- GITHUB ACTIONS -->
       <div id="gh-disconnected" class="card">
         <h2>Connect GitHub</h2>
         <p class="sub">We'll create a private repo in your GitHub account, upload the sync code, and run it on the schedule you pick.</p>
@@ -1060,9 +1099,82 @@ document.getElementById('copy-logs-btn').addEventListener('click', async () => {
 // Schedule tab
 // =============================================================== //
 
+// =============================================================== //
+// Local schedule (launchd)
+// =============================================================== //
+
+document.getElementById('local-sched-frequency').addEventListener('change', () => {
+  const freq = document.getElementById('local-sched-frequency').value;
+  document.getElementById('local-sched-time-field').style.display = (freq === 'hourly' || freq === 'six_hourly') ? 'none' : '';
+  document.getElementById('local-sched-weekday-field').style.display = (freq === 'weekly') ? '' : 'none';
+});
+
+document.getElementById('local-sched-enable-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('local-sched-enable-btn');
+  btn.disabled = true; btn.textContent = 'Enabling…';
+  await whenReady();
+  const r = await window.pywebview.api.install_local_schedule({
+    frequency: document.getElementById('local-sched-frequency').value,
+    time:      document.getElementById('local-sched-time').value,
+    weekday:   Number(document.getElementById('local-sched-weekday').value),
+  });
+  btn.disabled = false; btn.textContent = 'Enable local schedule';
+  const pill = document.getElementById('local-sched-status');
+  pill.classList.remove('hidden');
+  if (r.ok) {
+    pill.className = 'pill good';
+    pill.textContent = '✓ Scheduled';
+    document.getElementById('local-sched-disable-btn').classList.remove('hidden');
+  } else {
+    pill.className = 'pill bad';
+    pill.textContent = '✗ ' + (r.error || 'failed').slice(0, 60);
+  }
+});
+
+document.getElementById('local-sched-disable-btn').addEventListener('click', async () => {
+  await whenReady();
+  await window.pywebview.api.uninstall_local_schedule();
+  const pill = document.getElementById('local-sched-status');
+  pill.className = 'pill dim';
+  pill.textContent = 'Disabled';
+  document.getElementById('local-sched-disable-btn').classList.add('hidden');
+});
+
+async function refreshLocalSchedule() {
+  await whenReady();
+  const s = await window.pywebview.api.local_schedule_status();
+  document.getElementById('local-sched-frequency').value = s.frequency || 'daily';
+  document.getElementById('local-sched-time').value = s.time || '09:00';
+  document.getElementById('local-sched-weekday').value = String(s.weekday || 1);
+  const pill = document.getElementById('local-sched-status');
+  if (s.installed && s.active) {
+    pill.classList.remove('hidden');
+    pill.className = 'pill good';
+    pill.textContent = '✓ Active';
+    document.getElementById('local-sched-disable-btn').classList.remove('hidden');
+  } else if (s.installed) {
+    pill.classList.remove('hidden');
+    pill.className = 'pill warn';
+    pill.textContent = 'Installed (inactive)';
+    document.getElementById('local-sched-disable-btn').classList.remove('hidden');
+  } else {
+    pill.classList.add('hidden');
+    document.getElementById('local-sched-disable-btn').classList.add('hidden');
+  }
+  // Update field visibility
+  const freq = document.getElementById('local-sched-frequency').value;
+  document.getElementById('local-sched-time-field').style.display = (freq === 'hourly' || freq === 'six_hourly') ? 'none' : '';
+  document.getElementById('local-sched-weekday-field').style.display = (freq === 'weekly') ? '' : 'none';
+}
+
+// =============================================================== //
+// GitHub Actions schedule
+// =============================================================== //
+
 let devicePoll = null;
 
 async function refreshScheduleView() {
+  await refreshLocalSchedule();
   await whenReady();
   const status = await window.pywebview.api.github_status();
   const disconnected = document.getElementById('gh-disconnected');
