@@ -318,7 +318,6 @@ def _step_for_connection(conn: dict[str, Any]) -> str:
     """Render a single 'sync N' step in the workflow YAML."""
     suffix = _secret_suffix(conn["id"])
     name = conn.get("name") or conn["id"]
-    # YAML-safe: backslash-escape any quotes in the connection name
     safe_name = name.replace('"', '\\"')
     return f"""
       - name: "Sync — {safe_name}"
@@ -330,8 +329,38 @@ def _step_for_connection(conn: dict[str, Any]) -> str:
           DATE_PRESET:        ${{{{ secrets.DATE_PRESET_{suffix} }}}}
           MATCH_PREFIX:       ${{{{ secrets.MATCH_PREFIX_{suffix} }}}}
           LOG_LEVEL:          INFO
+          DRY_RUN:            ${{{{ github.event.inputs.dry_run }}}}
         continue-on-error: true
-        run: python executions/sync_engine.py
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "=== DRY RUN — no writes will be sent to ClickUp ==="
+            python -c "
+          import os, sys
+          os.environ['TITLE_MATCH_FALLBACK'] = '0'
+          sys.path.insert(0, '.')
+          from executions.sync_engine import *
+          log.info('DRY RUN — discovery only, no writes')
+          ads = get_meta_ads_with_status()
+          fields = get_clickup_field_map()
+          tasks = get_all_clickup_tasks()
+          insights = get_meta_insights()
+          log.info(f'Found {{len(ads)}} Meta ads, {{len(tasks)}} ClickUp tasks, {{len(insights)}} insight rows')
+          log.info(f'Resolved {{len(fields)}} custom fields')
+          meta_codes = {{}}
+          for ad in ads:
+              c = get_meta_ad_code(ad.get('name',''))
+              if c: meta_codes[c] = ad
+          matched = 0
+          for t in tasks:
+              if get_task_status(t) not in CU_SYNCABLE_STATUSES: continue
+              if not task_is_meta(t): continue
+              code = get_task_ad_code(t)
+              if code and code in meta_codes: matched += 1
+          log.info(f'Would sync {{matched}} matched tasks (no writes performed)')
+          "
+          else
+            python executions/sync_engine.py
+          fi
 """
 
 def render_workflow_yaml(cron: str, connections: list[dict[str, Any]]) -> bytes:
@@ -356,6 +385,15 @@ on:
   schedule:
     - cron: '{cron}'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Test run (no writes to ClickUp)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 concurrency:
   group: adsync
@@ -556,19 +594,22 @@ def list_workflow_runs(cfg: dict[str, Any], limit: int = 20) -> dict[str, Any]:
                 pass
     return _ok({"runs": runs, "total": data.get("total_count", len(runs))})
 
-def trigger_workflow(cfg: dict[str, Any]) -> dict[str, Any]:
+def trigger_workflow(cfg: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     token = cfg.get("github_token", "")
     full_name = _repo_full_name(cfg)
     if not token or not full_name:
         return _err("GitHub is not connected")
 
     default_branch = _get_default_branch(token, full_name)
+    payload = {"ref": default_branch}
+    if dry_run:
+        payload["inputs"] = {"dry_run": "true"}
     r = requests.post(
         f"{API_ROOT}/repos/{full_name}/actions/workflows/{WORKFLOW_NAME}/dispatches",
         headers=_headers(token),
-        json={"ref": default_branch},
+        json=payload,
         timeout=15,
     )
     if r.status_code == 204:
-        return _ok({"dispatched": True})
+        return _ok({"dispatched": True, "dry_run": dry_run})
     return _err(f"Dispatch failed: {r.status_code} {r.text[:200]}")

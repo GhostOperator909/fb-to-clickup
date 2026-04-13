@@ -1468,13 +1468,13 @@ class API:
         from github_client import list_workflow_runs
         return list_workflow_runs(cfg, limit=limit)
 
-    def trigger_remote_run(self):
+    def trigger_remote_run(self, dry_run: bool = False):
         """workflow_dispatch — fire a run in GitHub Actions right now."""
         cfg = load_config()
         if not cfg.get("github_token") or not cfg.get("github_repo"):
             return {"ok": False, "error": "GitHub is not connected"}
         from github_client import trigger_workflow
-        return trigger_workflow(cfg)
+        return trigger_workflow(cfg, dry_run=bool(dry_run))
 
     def open_url(self, url: str):
         """Open a URL in the user's default browser. Used by the GitHub

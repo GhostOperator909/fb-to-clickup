@@ -632,6 +632,7 @@
         <div class="btn-row">
           <button class="btn" id="sched-save-btn">Save &amp; Enable</button>
           <button class="btn ghost" id="sched-trigger-btn">Run Now (remote)</button>
+          <button class="btn ghost" id="sched-test-btn">Test Run (remote)</button>
           <div style="flex:1"></div>
           <button class="btn ghost" id="sched-disable-btn">Disable schedule</button>
           <button class="btn danger" id="gh-disconnect-btn">Disconnect</button>
@@ -1358,11 +1359,21 @@ document.getElementById('sched-disable-btn').addEventListener('click', async () 
 
 document.getElementById('sched-trigger-btn').addEventListener('click', async () => {
   await whenReady();
-  const r = await window.pywebview.api.trigger_remote_run();
+  const r = await window.pywebview.api.trigger_remote_run(false);
   const banner = document.getElementById('sched-status-banner');
   banner.classList.remove('hidden');
   banner.className = r.ok ? 'banner info' : 'banner bad';
   banner.textContent = r.ok ? 'Remote run dispatched. It will appear in "Recent runs" shortly.' : ('Failed: ' + r.error);
+  setTimeout(loadRuns, 3000);
+});
+
+document.getElementById('sched-test-btn').addEventListener('click', async () => {
+  await whenReady();
+  const r = await window.pywebview.api.trigger_remote_run(true);
+  const banner = document.getElementById('sched-status-banner');
+  banner.classList.remove('hidden');
+  banner.className = r.ok ? 'banner info' : 'banner bad';
+  banner.textContent = r.ok ? 'Test run dispatched (no writes). Check "Recent runs" for results.' : ('Failed: ' + r.error);
   setTimeout(loadRuns, 3000);
 });
 
