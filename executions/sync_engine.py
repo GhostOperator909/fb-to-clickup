@@ -60,7 +60,7 @@ def _parse_list_id(url: str) -> str:
 LIST_ID = _parse_list_id(LIST_URL)
 
 CU_HEADERS = {"Authorization": CLICKUP_KEY, "Content-Type": "application/json"}
-META_GRAPH = "https://graph.facebook.com/v19.0"
+META_GRAPH = "https://graph.facebook.com/v21.0"
 
 # Writable paths can be overridden so the bundled desktop app can redirect
 # logs and alias storage into ~/Library/Application Support/AdSync.
