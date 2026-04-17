@@ -1299,7 +1299,7 @@ class API:
         ]
 
     # --- sync runner ---------------------------------------------------- #
-    def run_sync(self, connection_id: str, dry_run: bool = False):
+    def run_sync(self, connection_id: str, dry_run=False):
         cfg = load_config()
         eff = get_effective_config(cfg, connection_id)
         if not eff:
@@ -1308,9 +1308,12 @@ class API:
         if missing:
             return {"ok": False, "error": f"Missing config for this connection: {', '.join(missing)}"}
         conn = find_connection(cfg, connection_id) or {}
+        # pywebview may pass JS false as Python string "false", and
+        # bool("false") is True — so we must check explicitly.
+        is_dry = dry_run is True or (isinstance(dry_run, str) and dry_run.lower() == "true")
         return RUNNER.start(
             eff,
-            dry_run=bool(dry_run),
+            dry_run=is_dry,
             connection_id=connection_id,
             connection_name=conn.get("name", connection_id),
         )
@@ -1468,13 +1471,16 @@ class API:
         from github_client import list_workflow_runs
         return list_workflow_runs(cfg, limit=limit)
 
-    def trigger_remote_run(self, dry_run: bool = False):
+    def trigger_remote_run(self, dry_run=False):
         """workflow_dispatch — fire a run in GitHub Actions right now."""
         cfg = load_config()
         if not cfg.get("github_token") or not cfg.get("github_repo"):
             return {"ok": False, "error": "GitHub is not connected"}
         from github_client import trigger_workflow
-        return trigger_workflow(cfg, dry_run=bool(dry_run))
+        # pywebview may pass JS false as Python string "false", and
+        # bool("false") is True — so we must check explicitly.
+        is_dry = dry_run is True or (isinstance(dry_run, str) and dry_run.lower() == "true")
+        return trigger_workflow(cfg, dry_run=is_dry)
 
     def open_url(self, url: str):
         """Open a URL in the user's default browser. Used by the GitHub
