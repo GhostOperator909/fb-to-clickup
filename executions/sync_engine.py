@@ -454,13 +454,13 @@ def update_clickup_field(task_id, field_id, value, task_name, field_name, value_
     """
     if value is None:
         log.debug(f"Skipping null for '{field_name}' on '{task_name}'")
-        return False
+        return None  # None = skipped (null from Meta), distinct from False (API failure)
     url = f"https://api.clickup.com/api/v2/task/{task_id}/field/{field_id}"
     payload = {"value": value}
     if value_options is not None:
         payload["value_options"] = value_options
     result = api_post(url, payload, headers=CU_HEADERS, label=f"{task_name}/{field_name}")
-    return result is not None
+    return True if result is not None else False
 
 def update_clickup_status(task_id, status, task_name):
     """Change a task's status (e.g. 'running - analytics', 'closed')."""
@@ -567,9 +567,12 @@ def task_is_meta(task):
         except (TypeError, ValueError):
             return str(platform_value) == CU_PLATFORM_META_OPTION_ID
 
-    # Platform not set — fall back to name heuristic
+    # Platform not set — fall back to name heuristic.
+    # Check for "meta" as a word in the name (underscore OR space delimited)
+    # so both "V1018_Meta_TOF_..." and "V1009 Meta BOF ..." are caught.
+    import re as _re
     name = (task.get("name") or "").lower()
-    return ("_meta_" in name) or name.startswith("meta_") or ("ad#" in name)
+    return bool(_re.search(r'[\s_]meta[\s_]|^meta[\s_]', name)) or ("ad#" in name)
 
 def get_task_status(task):
     return task.get("status", {}).get("status", "").lower()
@@ -779,14 +782,16 @@ def run_sync(title_match_fallback=False):
                     continue
                 value = extractor(insight_row)
                 vopts = {"time": False} if canonical_name in DATE_FIELD_NAMES else None
-                ok = update_clickup_field(
+                result = update_clickup_field(
                     task_id, uuid, value, task_name, canonical_name,
                     value_options=vopts,
                 )
-                if ok:
+                if result is True:
                     fields_updated += 1
+                elif result is None:
+                    pass  # null value from Meta — normal, not an error
                 else:
-                    task_errors.append(canonical_name)
+                    task_errors.append(canonical_name)  # real API failure
 
             entry = {
                 "task":          task_name,
