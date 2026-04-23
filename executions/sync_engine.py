@@ -515,23 +515,35 @@ def get_task_ad_code(task):
 
 def get_meta_ad_code(ad_name):
     """
-    Extract the full ad code from a Meta ad name. Matches:
-      'Ad#P1002'      → 'P1002'
-      'Ad#102413'     → '102413'
-      'Ad 5 (10021)'  → '10021' (parenthesized id)
-      'V1019'         → 'V1019'
+    Extract the full ad code from a Meta ad name. Matches (in priority order):
+
+      'Ad 177 (10001)'         → '10001'   (parenthesized creative ID — most common)
+      'Ad 36 (10004, H1)'     → '10004'   (with hook variant)
+      'Ad#P1002'               → 'P1002'   (explicit Ad# tag)
+      'Ad#102413'              → '102413'
+      'V1019'                  → 'V1019'   (leading alphanumeric code)
+
+    The parenthesized pattern is checked FIRST because the vast majority
+    of Meta ads use "Ad N (NNNNN, HN) | DATE" naming, where N is just a
+    sequential ad-set number and NNNNN is the actual creative ID that
+    matches ClickUp.
     """
     if not ad_name:
         return None
-    # Highest priority: explicit 'Ad#XXX' tag
-    m = re.search(r'Ad[#\s]?([A-Z]{0,4}\d{3,})', ad_name, re.IGNORECASE)
+    # Highest priority: "Ad N (NNNNN)" or "Ad N (NNNNN, HN)" pattern
+    # The parenthesized number is the creative ID that matches ClickUp.
+    m = re.search(r'Ad\s+\d+\s+\(([A-Z]{0,4}\d{3,})', ad_name, re.IGNORECASE)
     if m:
         return m.group(1).upper()
-    # Next: parenthesized numeric id like 'Ad 5 (10021)'
+    # Next: explicit 'Ad#XXX' tag (e.g. Ad#P1002, Ad#102413)
+    m = re.search(r'Ad[#]([A-Z]{0,4}\d{3,})', ad_name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    # Next: any parenthesized numeric id without the "Ad N" prefix
     m = re.search(r'\(([A-Z]{0,4}\d{3,})', ad_name, re.IGNORECASE)
     if m:
         return m.group(1).upper()
-    # Fallback: leading alphanumeric code
+    # Fallback: leading alphanumeric code at start of name
     m = re.match(r'([A-Z]{1,4}\d{3,})', ad_name, re.IGNORECASE)
     if m:
         return m.group(1).upper()
